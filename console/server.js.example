@@ -1,0 +1,2747 @@
+#!/usr/bin/env node
+/**
+ * dsh-console — TencentDB 控制台（后端）
+ *
+ * 零第三方依赖（仅 Node 内置模块）。负责：
+ *   1. 手动导入 / 全量重导（调 agents/asset-import.ts --source dsh）
+ *   2. 调度器：自动读取（fs.watch 监听 sessions 目录） / 循环定时（setInterval）
+ *   3. 解析模型切换（改写 MemoryCore/tdai-gateway.local.yaml 并重启 core）
+ *   4. 状态 / 配置 / 日志 REST API
+ *
+ * 启动：node dsh-console/server.js  （默认 127.0.0.1:8126）
+ */
+import http from 'node:http';
+import { execFile, spawn, spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import crypto from 'node:crypto';
+import { createRequire } from 'node:module';
+import { teamAssets, panelUserKey, panelTeamId } from './lib/panel-client.js';
+import * as maps from './lib/maps.js';
+import { readKsEnv, seedLabels, seedCgLabels } from './lib/seed.js';
+import { probeGit, mirrorOf, resolveCloneUrl, importLocal, CG_DEFAULT } from './lib/cg-import.js';
+// LLM WIKI 板块：资产注册表（独立 JSON 文件，不动 console-config.json）
+import * as wikiAssets from './lib/wiki-assets.js';
+// LLM WIKI 板块：更新执行器（spawn run_fullflow.py + 锁 + 状态 + SIGSTOP/SIGCONT/kill）
+import * as wikiRunner from './lib/wiki-runner.js';
+// LLM WIKI 板块：统一任务队列（更新/新增资产化 单队列串行，持久化+中断恢复）
+import * as wikiQueue from './lib/wiki-queue.js';
+// LLM WIKI：统一 LLM 模型预设总表 + 资产快照 resolve。
+import * as llmPresets from './lib/llm-presets.js';
+// 阶段5：唤起测试/真实注入同源唯一实现 = 沙盒插件模块（apply 的 pre-step 与 console 唤起测试共用 buildRecall）
+import { buildRecall as pluginBuildRecall, readConfig as pluginReadConfig, harnessMatch, harnessAssemble, harnessSaveRule, harnessLastUserText, harnessNorm } from './node_modules/tdai-memory-inject/lib/index.js';
+import { mountSearchRoutes, initSearchApi } from './search-api.js';
+// OV 导入 / 逐步 commit 控制（DeepSearch 新增板块）
+import { OvImport } from './lib/ov-import.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const CONSOLE_DIR = __dirname;
+// LLM WIKI 资产模版（内嵌骨架源，assetize.py 的 SELF）；env WIKI_ASSET_SELF 可覆盖
+const ASSET_SELF = process.env.WIKI_ASSET_SELF || path.join(__dirname, 'llm-wiki-asset');
+const REPO_ROOT = path.resolve(CONSOLE_DIR, '..');
+// better-sqlite3 等原生模块从 MemoryKnowledge 依赖解析（沙盒下经 .sandbox-run/MemoryKnowledge/package.json 锚点）
+const _req2 = createRequire(path.join(REPO_ROOT, 'MemoryKnowledge', 'package.json'));
+const require2 = (m) => _req2(m);
+const HOME = process.env.HOME || '';
+const BASE = process.env.TDAI_BASE || REPO_ROOT;
+const NODE22 = process.env.TDAI_NODE22 || path.join(HOME, '.local', 'node22', 'bin', 'node');
+const PORT = Number(process.env.DEEPSEARCH_CONSOLE_PORT || 6601);
+const HOST = process.env.DEEPSEARCH_CONSOLE_HOST || '127.0.0.1';
+
+const ASSET_IMPORT = path.join(BASE, 'agents', 'asset-import.ts');
+// tsx CLI 绝对路径（仓库根无 node_modules，不能用 `node --import tsx` 从根解析）
+const TSX_CLI = (() => {
+  const cand = [
+    path.join(BASE, 'MemoryProxy', 'node_modules', 'tsx', 'dist', 'cli.mjs'),
+    path.join(BASE, 'MemoryProxy', 'node_modules', '.bin', 'tsx'),
+  ];
+  for (const c of cand) if (fs.existsSync(c)) return c;
+  return 'tsx';
+})();
+const GATEWAY_YAML = path.join(BASE, 'MemoryCore', 'tdai-gateway.local.yaml');
+const GATEWAY_YAML_BAK = GATEWAY_YAML + '.bak-console';
+const DEFAULT_SESSIONS = path.join(HOME, '.dsh', 'sessions');
+const CONFIG_PATH = path.join(CONSOLE_DIR, 'console-config.json');
+// ── OpenViking VLM 配置（直接读写 ~/.openviking/ov.conf 的 vlm 段）──
+const OV_CONFIG_PATH = process.env.OV_CONFIG_PATH || path.join(HOME, '.openviking', 'ov.conf');
+const DEFAULT_OV_VLM = {
+  provider: 'openai',
+  api_key: '<API_KEY>',
+  model: 'Qwen3.8-27B-4bit',
+  api_base: 'http://127.0.0.1:18088/v1',
+  temperature: 0.0,
+  thinking: null,
+  max_tokens: null,
+  timeout: 1200,
+  max_retries: 3,
+  max_concurrent: 32,
+  reasoning_effort: null,
+};
+function readOvConf() {
+  try { return JSON.parse(fs.readFileSync(OV_CONFIG_PATH, 'utf8')); }
+  catch { return {}; }
+}
+function readOvVlm() {
+  const conf = readOvConf();
+  return { ...DEFAULT_OV_VLM, ...(conf.vlm || {}) };
+}
+function writeOvVlm(vlm) {
+  const conf = readOvConf();
+  conf.vlm = { ...(conf.vlm || {}), ...vlm };
+  const bak = OV_CONFIG_PATH + '.bak-console';
+  try { fs.copyFileSync(OV_CONFIG_PATH, bak); } catch {}
+  fs.writeFileSync(OV_CONFIG_PATH, JSON.stringify(conf, null, 2) + '\n', 'utf8');
+  return conf.vlm;
+}
+function validateOvVlmBody(body) {
+  const errors = [];
+  if (body.temperature !== undefined) {
+    const t = Number(body.temperature);
+    if (!Number.isFinite(t) || t < 0 || t > 2) errors.push('temperature 须在 0–2 之间');
+  }
+  if (body.timeout !== undefined) {
+    const t = Number(body.timeout);
+    if (!Number.isFinite(t) || t <= 0) errors.push('timeout 须为正数');
+  }
+  if (body.max_retries !== undefined) {
+    const t = Number(body.max_retries);
+    if (!Number.isFinite(t) || t < 0 || t % 1 !== 0) errors.push('max_retries 须为非负整数');
+  }
+  if (body.max_tokens !== undefined && body.max_tokens !== null) {
+    const t = Number(body.max_tokens);
+    if (!Number.isFinite(t) || t <= 0 || t % 1 !== 0) errors.push('max_tokens 须为正整数');
+  }
+  if (body.max_concurrent !== undefined) {
+    const t = Number(body.max_concurrent);
+    if (!Number.isFinite(t) || t <= 0 || t % 1 !== 0) errors.push('max_concurrent 须为正整数');
+  }
+  if (body.thinking !== undefined && typeof body.thinking !== 'boolean' && body.thinking !== null) errors.push('thinking 须为 boolean 或 null');
+  return errors.length ? { ok: false, reason: errors.join('; ') } : { ok: true };
+}
+// ── OV 导入 / 逐步 commit（DeepSearch 新增：独立状态与进度文件）──
+const OV_STATE = path.join(CONSOLE_DIR, 'ov-state.json');
+const OV_PROGRESS = path.join(CONSOLE_DIR, 'ov-progress.json');
+const OV_DONE = path.join(CONSOLE_DIR, 'ov-done.json');
+const OV_DONE_PARTS = path.join(CONSOLE_DIR, 'ov-done-parts.json');
+let _ovImport = null;
+function getOvImport() {
+  if (!_ovImport) {
+    const oc = loadConfig().ovImport || {};
+    _ovImport = new OvImport({
+      stateFile: OV_STATE, progressFile: OV_PROGRESS, doneFile: OV_DONE, donePartsFile: OV_DONE_PARTS, configFile: CONFIG_PATH,
+      ovBaseUrl: oc.ovBaseUrl || 'http://127.0.0.1:1933',
+      ovApiKey: oc.ovApiKey || '',
+      sessionsDir: oc.sessionsDir || '',
+      stateDbPath: oc.stateDbPath || path.join(process.env.HOME || '', 'ToDo', '.sandbox-run', 'dsh-session-import-20261024', 'ingest-script', 'ov-ingest-state-prod.db'),
+      log: (...a) => log('info', '[ov-import]', ...a),
+    });
+  }
+  return _ovImport;
+}
+const LOG_PATH = path.join(BASE, '.tdai-logs', 'console.log');
+const STATE_FILE = path.join(BASE, '.asset-import-state.json');
+const CORE_ENTRY = path.join(BASE, 'MemoryCore', 'src', 'gateway', 'server.ts');
+// ── Mem0 解析导入（L0 → mem0，infer=True；独立游标 mem0-tsCursor，错峰排 L1 之后）──
+const MEM0_ROOT = process.env.MEM0_ROOT || path.join(BASE, '.data', 'mem0'); // fixes: 沙盒可用 env 指向 active；生产不设=原路径
+const MEM0_STATE = path.join(MEM0_ROOT, 'mem0-state.json');
+const MEM0_CONTROL = path.join(MEM0_ROOT, 'mem0-control.json');
+const MEM0_PROD_RUN = path.join(MEM0_ROOT, 'mem0-prod-run.py');
+const MEM0_SEARCH_PY = path.join(MEM0_ROOT, 'mem0-search.py'); // fallback 一次性脚本（--query CLI，不许改指）
+const MEM0_IMPORTS_ROOT = process.env.MEM0_IMPORTS_ROOT || path.join(MEM0_ROOT, 'imports');
+const MEM0_IMPORT_LOCK = process.env.MEM0_IMPORT_LOCK || path.join(MEM0_ROOT, 'import.lock');
+const MEM0_ACTIVATION = process.env.MEM0_ACTIVATION_FILE || path.join(MEM0_ROOT, 'activation.json');
+const MEM0_PREFLIGHT_PORT = Number(process.env.MEM0_PREFLIGHT_PORT || 18916);
+const MEM0_SERVER = process.env.MEM0_SERVER_URL || 'http://127.0.0.1:8915';
+const MEM0_OWNER_FILE = process.env.MEM0_OWNER_FILE || path.join(MEM0_ROOT, 'mem0-search-owner.json');
+// ── fixes F5: 恢复状态必须模块顶层（handler 内每次请求重置会使冷却失效）──
+let mem0RecoveryPromise = null;
+let lastMem0RecoveryAt = 0;
+const MEM0_RECOVERY_COOLDOWN_MS = 30_000;
+const MEM0_RECOVERY_MAX_MS = 10_000;
+const MEM0_ACTIVATING = { ok: false, source: 'activating', reason: '切换中，勿 fallback' };
+const MEM0_RECOVERING = { ok: false, source: 'recovering', retryAfterMs: 3000, reason: '恢复中' };
+const BUNDLE_FILES = ['chroma-data', 'mem0-history.db', 'mem0-state.json',
+                      'mem0-count.json', 'probe-records.jsonl', 'probe-query.json'];
+const MEM0_SEARCH_SERVER_PY = path.join(MEM0_ROOT, 'mem0-search-server.py'); // 常驻服务（--port daemon）预检/激活/恢复专用
+const MEM0_VENV_PY = process.env.MEM0_VENV_PY || path.join(MEM0_ROOT, 'venv', 'bin', 'python');
+const MEM0_PY_DIR = path.join(MEM0_ROOT, 'py-mem0dir');
+const MEM0_CHROMA = path.join(MEM0_ROOT, 'chroma-data');
+// 生产/沙盒解释器统一入口：显式 MEM0_VENV_PY 或默认 root/venv；不含任何沙盒硬编码路径
+const PROD_MEM0_VENV_PY = ''; // 同步生产=空（无 fallback）；沙盒测试用 MEM0_VENV_PY env 显式指定
+const mem0Py = () => (fs.existsSync(MEM0_VENV_PY) ? MEM0_VENV_PY : (PROD_MEM0_VENV_PY && fs.existsSync(PROD_MEM0_VENV_PY) ? PROD_MEM0_VENV_PY : MEM0_VENV_PY));
+
+// ────────────────────────────── 配置 ──────────────────────────────
+const DEFAULT_CONFIG = {
+  scheduler: { enabled: false, mode: 'cron', intervalMin: 60, startMode: 'now', startAt: '', startDaily: '02:00' }, // mode: watch | cron | manual; startMode: now | at | daily
+  import: { teamId: '', agentId: '', extract: 'both', sessionsDir: '', workspace: '' },
+  model: { baseUrl: 'http://127.0.0.1:18088/v1', apiKey: '<API_KEY>', model: 'Qwen3.8-27B-4bit' },
+  // Mem0 解析导入（L0 → mem0，infer=True；独立游标，错峰排 L1 之后）
+  mem0Import: { enabled: false, mode: 'sched', intervalMin: 720, startMode: 'at', startAt: '', startDaily: '03:00', schedN: 200, batchChars: 30000 },
+  // Mem0 模型（LLM 解析导入；统一预设表 config.model.presets 引用，不独立建库）
+  mem0Model: { baseUrl: 'http://127.0.0.1:18088/v1', apiKey: '<API_KEY>', model: 'Qwen3.8-27B-4bit', maxTokens: 20000 },
+  // OV 导入 / 逐步 commit（DeepSearch：会话清单读状态库，串行分批 commit）
+  ovImport: { ovBaseUrl: 'http://127.0.0.1:1933', ovApiKey: '', stateDbPath: '', batchSessions: 10, intervalMin: 5, enabled: false, mode: 'sched', startMode: 'daily', startAt: '', startDaily: '03:00' },
+  // LLM WIKI 全局定时更新（独立于 TDB/mem0；到点对 enabled 资产串行 startUpdate）
+  wikiUpdate: { enabled: false, mode: 'sched', intervalMin: 720, startMode: 'at', startAt: '', startDaily: '03:00' },
+};
+
+function loadConfig() {
+  try { return { ...DEFAULT_CONFIG, ...JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) }; }
+  catch { return structuredClone(DEFAULT_CONFIG); }
+}
+function saveConfig(cfg) {
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+}
+
+// ── Mem0 状态（独立游标 / 计划止于 / 进度）+ 记忆总量计数 ──
+function readMem0State() {
+  try { return JSON.parse(fs.readFileSync(MEM0_STATE, 'utf8')); }
+  catch { return { cursorTs: null, plannedEndTs: null, currentId: '', total: 0, done: 0, failed: 0, running: false, startedAt: 0, finishedAt: 0, lastError: '' }; }
+}
+function writeMem0State(st) {
+  try { fs.mkdirSync(path.dirname(MEM0_STATE), { recursive: true }); fs.writeFileSync(MEM0_STATE, JSON.stringify(st, null, 2)); } catch {}
+}
+// 记忆总量：只读快照文件（mem0-count.json，由导入/重建完成时写入），零 Chroma 打开。
+// 绝不在 status 请求路径 spawn Python/Chroma（曾致生产 SIGSEGV 弹窗）。
+const MEM0_COUNT_FILE = path.join(MEM0_ROOT, 'mem0-count.json');
+function mem0CountSnapshot() {
+  try {
+    const d = JSON.parse(fs.readFileSync(MEM0_COUNT_FILE, 'utf8'));
+    const n = Number(d.count);
+    if (Number.isFinite(n) && n >= 0) return { memoryCount: n, memoryCountStatus: 'snapshot', memoryCountAt: d.at || null };
+  } catch {}
+  return { memoryCount: null, memoryCountStatus: 'index-unverified', memoryCountAt: null };
+}
+
+/** 解析「每次条数」：0 / 空 / 缺省 = 0（全部增量：游标后不限制条数）；>0 = 限制条数。
+ *  opts.limitN / opts.limitBatches 优先，回退 config.mem0Import.schedN，再回退 0（全部）。 */
+function resolveLimitRows(opts, cfg) {
+  const raw = (opts && opts.limitN !== undefined && opts.limitN !== null && opts.limitN !== '') ? opts.limitN
+    : ((opts && opts.limitBatches !== undefined && opts.limitBatches !== null && opts.limitBatches !== '') ? opts.limitBatches
+    : ((cfg && cfg.schedN !== undefined && cfg.schedN !== null && cfg.schedN !== '') ? cfg.schedN : 0));
+  const n = Number(raw);
+  return (Number.isFinite(n) && n > 0) ? Math.floor(n) : 0; // 0 = 全部增量；非法/非正数视为全部
+}
+
+/** 当前 Mem0 runner 子进程（stop 精确 kill 用；避免 pkill -f 按名误杀） */
+let mem0Child = null;
+
+/** 触发一次 Mem0 写入（定时调度入口；写候选 work 目录，绝不直写 active）。
+ *  opts.limitN / opts.limitBatches 优先，回退 config.mem0Import.schedN；0=全部增量（游标后不限制条数）。
+ *  opts.untilTs / opts.cutoff = 目标截止 ISO（手动导入「目标截止」模式：只处理 recorded_at<=untilTs）。
+ *  正在 running 时返回 ok:false + reason，不 spawn 新进程。
+ *  保留生产原有的代理环境变量清理（防 :1 端口劫持）。 */
+async function runMem0Import(opts = {}) {
+  try {
+    const untilTs = opts.untilTs || opts.cutoff || ''; // 手动导入「目标截止」模式（recorded_at<=untilTs）
+    const limitRows = untilTs ? 0 : resolveLimitRows(opts, config.mem0Import || {}); // 截止模式=全量到截止，不按条数截断
+    try { fs.unlinkSync(MEM0_CONTROL); } catch {}
+    const r = await startCandidateImport({ source: 'sched', untilTs, limitRows });
+    if (!r.ok) return r;
+    return { ok: true, started: true, limitRows, runId: r.runId };
+  } catch (e) {
+    return { ok: false, reason: String(e?.message || e) };
+  }
+}
+
+let config = loadConfig();
+
+// ── fixes F5 双锁与激活/owner 读写（候选隔离基础设施；merge 时必须保留）──
+function acquireImportLock(runId, workDir, mode) {
+  const lock = { runId, workDir, mode, childPid: null };
+  const fd = fs.openSync(MEM0_IMPORT_LOCK, 'wx');
+  fs.writeFileSync(fd, JSON.stringify(lock));
+  fs.closeSync(fd);
+  return lock;
+}
+function readImportLock() { try { return JSON.parse(fs.readFileSync(MEM0_IMPORT_LOCK, 'utf8')); } catch { return null; } }
+function releaseImportLock() { try { fs.rmSync(MEM0_IMPORT_LOCK, { force: true }); } catch {} }
+function readActivation() { try { return JSON.parse(fs.readFileSync(MEM0_ACTIVATION, 'utf8')); } catch { return null; } }
+function writeActivation(a) {
+  const tmp = MEM0_ACTIVATION + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(a)); fs.fsyncSync(fs.openSync(tmp, 'r+'));
+  fs.renameSync(tmp, MEM0_ACTIVATION);
+}
+function writeResult(workDir, data) {
+  const p2 = path.join(workDir, 'run.json'); const tmp = p2 + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(data));
+  fs.fsyncSync(fs.openSync(tmp, 'r+'));
+  fs.renameSync(tmp, p2);
+}
+function candidateOutcome(workDir) {
+  try { return JSON.parse(fs.readFileSync(path.join(workDir, 'run.json'), 'utf8')); } catch { return null; }
+}
+function readOwner() { try { return JSON.parse(fs.readFileSync(MEM0_OWNER_FILE, 'utf8')); } catch { return null; } }
+function writeOwner(o) { try { fs.writeFileSync(MEM0_OWNER_FILE, JSON.stringify(o)); } catch {} }
+
+/** 候选隔离导入公共入口（write 路由 + 定时调度共用；绝不让 runner 落入直写 active）。
+ *  创建 imports/<runId>/work 候选目录 → COW 克隆 active 可变文件 → 运行锁互斥
+ *  → spawn runner（MEM0_WORK_DIR 指向候选）→ exit 后按 run.json outcome 释放锁。
+ *  source 区分入口：write=手动 / sched=定时 / resume=续跑 / retry=失败清单。 */
+async function startCandidateImport({ runIdHint, untilTs = '', limitRows, source = 'write', failedOnly = false } = {}) {
+  if (readActivation()) return { ok: false, reason: '激活进行中，拒绝新导入' };
+  if (readImportLock()) return { ok: false, reason: '已有导入运行中' };
+  const runId = runIdHint || ('run-' + Date.now().toString(36));
+  const workDir = path.join(MEM0_IMPORTS_ROOT, runId, 'work');
+  fs.mkdirSync(path.join(MEM0_IMPORTS_ROOT, runId), { recursive: true });
+  fs.mkdirSync(workDir, { recursive: true });
+  // 克隆 active 可变文件 → 候选（COW）
+  for (const n of BUNDLE_FILES) {
+    const src = path.join(MEM0_ROOT, n);
+    if (fs.existsSync(src)) {
+      const dst = path.join(workDir, n);
+      if (fs.statSync(src).isDirectory()) { try { fs.cpSync(src, dst, { recursive: true, force: true }); } catch { fs.mkdirSync(dst, { recursive: true }); } }
+      else { try { fs.copyFileSync(src, dst); } catch {} }
+    }
+  }
+  const lock = acquireImportLock(runId, workDir, source);
+  const st = readMem0State(); delete st.stoppedByUser;
+  const totalRows = failedOnly ? (st.failedIds || []).length : limitRows;
+  writeMem0State({ ...st, running: true, startedAt: Date.now(), total: totalRows, done: 0, currentId: '', lastError: '', runId });
+  // fixes F7a: 候选 clone 自带上一轮 done/total（BUNDLE_FILES 复制 active state），status 运行时读候选
+  // 会显示上一轮进度（如 200/200）。重置候选 state 为本次起点（保留 cursorTs/plannedEndTs/failedIds 供续跑）。
+  try {
+    const cand = { ...st, running: false, paused: false, startedAt: Date.now(), total: totalRows, done: 0, currentId: '', lastError: '', runId };
+    delete cand.stoppedByUser;
+    if (failedOnly) cand.failedIds = st.failedIds || [];
+    fs.writeFileSync(path.join(workDir, 'mem0-state.json'), JSON.stringify(cand));
+  } catch {}
+  const spawnEnv = { ...process.env, MEM0_DIR: MEM0_PY_DIR, MEM0_WORK_DIR: workDir, MEM0_RUN_ID: runId };
+  ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'no_proxy'].forEach((k) => delete spawnEnv[k]);
+  let args;
+  if (failedOnly) { args = [MEM0_PROD_RUN, '--run-id', runId, '--failed-only']; }
+  else { args = [MEM0_PROD_RUN, '--run-id', runId, '--limit-rows', String(limitRows)]; if (untilTs) args.push('--until', String(untilTs)); }
+  const child = spawn(mem0Py(), args, { env: spawnEnv, stdio: 'ignore' });
+  mem0Child = child;
+  lock.childPid = child.pid; fs.writeFileSync(MEM0_IMPORT_LOCK, JSON.stringify(lock));
+  child.on('exit', (code, signal) => {
+    if (mem0Child === child) mem0Child = null;
+    const c = candidateOutcome(workDir); const x = readMem0State();
+    x.running = false; x.finishedAt = Date.now(); x.lastCode = code;
+    x.interrupted = !!((signal && !x.stoppedByUser) || (code !== 0 && !x.lastError && !x.paused));
+    // fixes: 候选 state 的 done/total/failed 回填 active（否则 status 读 active 卡 done=0）
+    try {
+      const cand = JSON.parse(fs.readFileSync(path.join(workDir, 'mem0-state.json'), 'utf8'));
+      if (cand && typeof cand.done === 'number') {
+        x.done = cand.done; x.total = cand.total;
+        if (typeof cand.failed === 'number') x.failed = cand.failed;
+        if (cand.failedIds) x.failedIds = cand.failedIds;
+        if (cand.cursorTs) x.cursorTs = cand.cursorTs;
+        if (cand.plannedEndTs) x.plannedEndTs = cand.plannedEndTs;
+        if (cand.runId) x.runId = cand.runId;
+      }
+    } catch {}
+    if (c) { x.lastOutcome = c.outcome; writeMem0State(x); if (['completed','paused','stopped','failed','partial-completed'].includes(c.outcome)) releaseImportLock(); else x.stale = true; } else { releaseImportLock(); }
+    writeMem0State(x);
+    // fixes: 导入成功后标记"待自动激活"（E+ 定时链漏接的闭环；F11: partial-completed 同享，激活后可用 clone retry 补失败）。
+    // exit 回调在顶层、无法引用 handler 内定义的 activateReadyImport，
+    // 故只设全局标记，由 status 路由（handler 内）消费并执行激活。
+    if (c && ['completed', 'partial-completed'].includes(c.outcome) && !c.skippedEmpty && !readActivation() && !x.stoppedByUser && !x.paused) {
+      globalThis.__mem0PendingActivateRunId = runId;
+    }
+  });
+  return { ok: true, started: true, runId, workDir, limitRows };
+}
+
+// ────────────────────────────── 日志 ──────────────────────────────
+const recentLogs = []; // [{time, kind, text}]
+function log(kind, text) {
+  const line = { time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), kind, text };
+  recentLogs.unshift(line);
+  if (recentLogs.length > 300) recentLogs.pop();
+  try { fs.appendFileSync(LOG_PATH, `[${line.time}] [${kind}] ${text}\n`, 'utf8'); } catch {}
+  console.log(`[${line.time}] [${kind}] ${text}`);
+}
+
+// ────────────────────────────── 日志历史（重启不丢） ──────────────────────────────
+function parseLogLine(line) {
+  const m = /^\[(\d{2}:\d{2}:\d{2})\] \[(\w+)\] (.*)$/.exec(line);
+  if (!m) return null;
+  return { time: m[1], kind: m[2], text: m[3] };
+}
+function loadLogHistory(filePath = LOG_PATH, max = 300) {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const parsed = raw.split("\n").filter(Boolean).map(parseLogLine).filter(Boolean);
+    return parsed.slice(-max).reverse(); // newest-first，与 recentLogs.unshift 语义一致
+  } catch { return []; }
+}
+recentLogs.push(...loadLogHistory());
+
+// ────────────────────────────── 工具 ──────────────────────────────
+function isPortUpSync(port) {
+  try {
+    const r = spawnSync('lsof', ['-iTCP:' + port, '-sTCP:LISTEN', '-n', '-P'], { encoding: 'utf8' });
+    return r.status === 0 && /LISTEN/.test(r.stdout);
+  } catch { return false; }
+}
+
+// 从 state 文件嗅探已用过的 agent id（供 UI 预填）
+function sniffIdsFromState() {
+  try {
+    const st = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    const done = Array.isArray(st.done) ? st.done : [];
+    const agents = new Set();
+    for (const k of done) {
+      const m = k.match(/^agt-[\w]+/);
+      if (m) agents.add(m[0]);
+    }
+    return { agents: [...agents] };
+  } catch { return { agents: [] }; }
+}
+
+// ────────────────────────────── 导入执行 ──────────────────────────────
+let importRunning = false;
+let lastImport = null; // {at, ok, ms, summary}
+
+async function runImport(o = {}) {
+  if (importRunning) return { ok: false, reason: 'busy' };
+  const cfg = config.import;
+  const agentId = o.agentId ?? cfg.agentId;
+  const teamId = o.teamId ?? cfg.teamId;
+  if (!agentId || !teamId) {
+    lastImport = { at: new Date().toISOString(), ok: false, summary: '缺少 agent-id / team-id，请先在「导入管理」选择目标' };
+    log('err', lastImport.summary);
+    return { ok: false, reason: lastImport.summary };
+  }
+  importRunning = true;
+  const extract = o.extract ?? cfg.extract;
+  const sessionsDir = o.sessionsDir || cfg.sessionsDir || DEFAULT_SESSIONS;
+
+  // asset-import 依赖系统 zstd 命令解压 session.jsonl.zstd；PATH 需含 /opt/homebrew/bin
+  const env = {
+    ...process.env,
+    PATH: ['/opt/homebrew/bin', '/usr/local/bin', process.env.PATH].filter(Boolean).join(':'),
+    PANEL_URL: process.env.PANEL_URL || 'http://127.0.0.1:8123',
+    TDAI_SERVICE_ID: process.env.TDAI_SERVICE_ID || 'default',
+    TDAI_USER_KEY: cfg.userKey || process.env.TDAI_USER_KEY || '',
+  };
+  const args = ['--source', 'dsh', '-y', '--agent-id', agentId, '--team-id', teamId,
+    '--extract', extract];
+  // ⚠️ 仅当用户显式指定自定义 sessions 目录时才传 --sessions：
+  // asset-import 的 scanSessionsOverride 走 listJsonlRecursive + readFileSync，
+  // 不识别 session.jsonl.zstd；不传时走 scanSessions（walkFiles + zstd 解压 + dsh 解析），
+  // 才是支持 dsh 格式的正确路径。默认用 $DSH_HOME/sessions。
+  if (o.sessionsDir || cfg.sessionsDir) args.push('--sessions', sessionsDir);
+  // 指定 session id（逗号分隔）筛选；可与自定义目录共存（--session-ids 独立筛选）
+  if (o.sessionIds && String(o.sessionIds).trim()) args.push('--session-ids', String(o.sessionIds).trim());
+  if (o.force) args.push('--force');
+  if (o.workspace || cfg.workspace) args.push('--workspace', o.workspace || cfg.workspace);
+  if (o.stateFile) args.push('--state-file', o.stateFile);
+
+  log('run', `asset-import ${extract}${o.force ? ' (force)' : ''} agent=${agentId} team=${teamId}`);
+  const t0 = Date.now();
+  try {
+    const out = await new Promise((resolve) => {
+      execFile(NODE22, [TSX_CLI, ASSET_IMPORT, ...args], { cwd: BASE, env, maxBuffer: 64 * 1024 * 1024, timeout: Number(config.import.importTimeoutMs) || 1800000 },
+        (err, stdout, stderr) => resolve({ err, stdout, stderr }));
+    });
+    const text = (out.stdout || '') + (out.stderr || '');
+    const ms = Date.now() - t0;
+    const ok = !out.err || out.err.code === 0;
+    const summary = text.split('\n').filter((l) => /导入|success|完成|session|skill|✓|✗|error|错误|跳过/i.test(l)).slice(-8).join(' | ') || text.slice(0, 300);
+    lastImport = { at: new Date().toISOString(), ok, ms, summary, raw: text.slice(0, 1500) };
+    log(ok ? 'ok' : 'err', `asset-import ${ms}ms → ${ok ? '成功' : '失败'} ${summary.slice(0, 200)}`);
+    importRunning = false;
+    // reason 供前端展示真实失败原因（而非笼统的 400 / Bad Request）
+    return { ok, ms, summary, reason: ok ? undefined : (summary || text.slice(0, 300)) };
+  } catch (e) {
+    lastImport = { at: new Date().toISOString(), ok: false, ms: Date.now() - t0, summary: String(e) };
+    log('err', `asset-import 异常: ${e.message}`);
+    importRunning = false;
+    return { ok: false, reason: String(e) };
+  }
+}
+
+// 列出可导入的 session（调 asset-import --list-sessions，零写入）。
+// dir: 可选自定义目录；sessionIds: 可选逗号分隔筛选。返回 {ok, sessions:[{sessionId,origin,messages,timeRange,firstUser}]}
+async function listSessions(dir, sessionIds) {
+  const env = {
+    ...process.env,
+    PATH: ['/opt/homebrew/bin', '/usr/local/bin', process.env.PATH].filter(Boolean).join(':'),
+  };
+  const args = ['--source', 'dsh', '--list-sessions', '-y'];
+  if (dir && String(dir).trim()) args.push('--sessions', String(dir).trim());
+  if (sessionIds && String(sessionIds).trim()) args.push('--session-ids', String(sessionIds).trim());
+  try {
+    const out = await new Promise((resolve) => {
+      execFile(NODE22, [TSX_CLI, ASSET_IMPORT, ...args], { cwd: BASE, env, maxBuffer: 64 * 1024 * 1024, timeout: 120000 },
+        (err, stdout, stderr) => resolve({ err, stdout, stderr }));
+    });
+    const text = (out.stdout || '') + (out.stderr || '');
+    const line = text.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('{')).pop();
+    if (!line) return { ok: false, reason: 'asset-import 未返回 JSON：' + text.slice(0, 300) };
+    const j = JSON.parse(line);
+    return { ok: true, sessions: (j.sessions || []), raw: text.slice(0, 800) };
+  } catch (e) {
+    return { ok: false, reason: String(e) };
+  }
+}
+
+// ────────────────────────────── 调度器 ──────────────────────────────
+let watcher = null;
+let timer = null;
+let watchDebounce = null;
+let nextRunAt = null; // 下一次 cron 触发的 epoch ms
+let mem0Timer = null; // Mem0 调度器 setTimeout 句柄（独立于 TDB timer）
+let mem0NextRunAt = null; // Mem0 下一次触发 epoch ms
+let wikiTimer = null; // LLM WIKI 调度器 setTimeout 句柄（独立于 TDB/Mem0）
+let wikiNextRunAt = null; // LLM WIKI 下一次触发 epoch ms
+
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+/** 通用计算下一次触发时间。三分支：daily（每日固定时间）/ at（指定时间点+interval）/ now（默认，以调用时刻+interval 或上一 nextRunAt 为起点）。
+ *  cfg 需含 intervalMin / startMode / startAt / startDaily；prevNextRun 用于 now 模式连续性（null 走 now+interval）。
+ *  TDB 与 mem0 共用同一计算逻辑，避免算法漂移。 */
+function computeNextRunGeneric(cfg, prevNextRun) {
+  const min = Math.max(1, Number(cfg.intervalMin) || 60);
+  const intervalMs = min * 60 * 1000;
+  const now = Date.now();
+  if (cfg.startMode === 'daily') {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(cfg.startDaily || '');
+    if (!m) return now + intervalMs;
+    let d = new Date();
+    d.setHours(Number(m[1]), Number(m[2]), 0, 0);
+    if (d.getTime() <= now) d = new Date(d.getTime() + 24 * 3600 * 1000);
+    return d.getTime();
+  }
+  if (cfg.startMode === 'at') {
+    const t = cfg.startAt ? new Date(cfg.startAt).getTime() : NaN;
+    if (!Number.isNaN(t)) {
+      let base = t;
+      while (base <= now) base += intervalMs;
+      return base;
+    }
+  }
+  // now 模式（默认）：以首次 apply 时刻为起点，之后每 interval 触发
+  return (prevNextRun && prevNextRun > now) ? prevNextRun : now + intervalMs;
+}
+
+/** TDB 调度器下一次触发时间（保留原签名，供 armCronTimer 调用）。 */
+function computeNextRun() { return computeNextRunGeneric(config.scheduler, nextRunAt); }
+
+function armCronTimer(fromTrigger = false) {
+  nextRunAt = computeNextRun();
+  const delay = Math.max(1000, nextRunAt - Date.now());
+  const when = `${new Date(nextRunAt).toLocaleString('zh-CN', { hour12: false })}（${Math.round(delay / 60000)} 分钟后）`;
+  log('info', fromTrigger ? `循环定时触发完成，下次导入 ${when}` : `调度器已就绪：下次导入 ${when}`);
+  timer = setTimeout(async () => {
+    if (config.scheduler.enabled && config.scheduler.mode === 'cron') {
+      await runImport({});
+      // 触发完重新排下一次（now 模式从此刻起算下一周期）
+      if (config.scheduler.enabled && config.scheduler.mode === 'cron') armCronTimer(true);
+    }
+  }, delay);
+}
+
+/** Mem0 调度器：镜像 armCronTimer，但消费 mem0Import 配置、触发 runMem0Import、日志带 "Mem0" 前缀。
+ *  独立 setTimeout 链，与 TDB armCronTimer 完全解耦。 */
+function armMem0Timer(fromTrigger = false) {
+  mem0NextRunAt = computeNextRunGeneric(config.mem0Import, mem0NextRunAt);
+  const delay = Math.max(1000, mem0NextRunAt - Date.now());
+  const when = `${new Date(mem0NextRunAt).toLocaleString('zh-CN', { hour12: false })}（${Math.round(delay / 60000)} 分钟后）`;
+  log('info', fromTrigger ? `Mem0 定时触发完成，下次写入 ${when}` : `Mem0 调度器已就绪：下次写入 ${when}`);
+  mem0Timer = setTimeout(async () => {
+    if (config.mem0Import.enabled && config.mem0Import.mode === 'sched') {
+      const r = await runMem0Import({ limitBatches: config.mem0Import.schedN });
+      if (r.ok) log('info', `Mem0 定时触发成功（limitN=${r.limitRows}）`);
+      else log('warn', `Mem0 定时触发跳过: ${r.reason}`);
+      // 无论 ok 与否都重排——避免"跳过"这一次触发就消失
+      if (config.mem0Import.enabled && config.mem0Import.mode === 'sched') armMem0Timer(true);
+    }
+  }, delay);
+}
+
+function applyScheduler() {
+  stopScheduler();
+  if (!config.scheduler.enabled) { log('info', '调度器关闭'); return; }
+  const mode = config.scheduler.mode;
+  if (mode === 'watch') {
+    const dir = config.import.sessionsDir || DEFAULT_SESSIONS;
+    if (!fs.existsSync(dir)) { log('warn', `监听目录不存在: ${dir}`); return; }
+    try {
+      watcher = fs.watch(dir, { recursive: true }, (ev, fn) => {
+        if (!config.scheduler.enabled) return;
+        if (!fn || !/session\.jsonl(\.zstd)?$/.test(String(fn))) return;
+        if (watchDebounce) clearTimeout(watchDebounce);
+        watchDebounce = setTimeout(() => runImport({}), 2000); // debounce 2s
+      });
+      log('info', `自动读取模式已开启，监听 ${dir}`);
+    } catch (e) {
+      log('warn', `fs.watch 失败（recursive 可能不可用）: ${e.message}`);
+    }
+  } else if (mode === 'cron') {
+    armCronTimer();
+  } else {
+    nextRunAt = null;
+    log('info', '手动模式（无自动任务）');
+  }
+}
+function stopScheduler() {
+  if (watcher) { try { watcher.close(); } catch {} watcher = null; }
+  if (timer) { clearTimeout(timer); timer = null; }
+  if (watchDebounce) { clearTimeout(watchDebounce); watchDebounce = null; }
+  nextRunAt = null;
+}
+
+/** Mem0 调度器停止：清理 setTimeout 与 nextRunAt。不碰 TDB 的任何状态。 */
+function stopMem0Scheduler() {
+  if (mem0Timer) { clearTimeout(mem0Timer); mem0Timer = null; }
+  mem0NextRunAt = null;
+}
+
+/** Mem0 调度器启动：根据 config.mem0Import 决定 arm 或关闭。
+ *  独立于 TDB 调度器，不调用 stopScheduler/applyScheduler。 */
+function applyMem0Scheduler() {
+  stopMem0Scheduler();
+  if (config.mem0Import.enabled && config.mem0Import.mode === 'sched') {
+    armMem0Timer();
+  } else {
+    mem0NextRunAt = null;
+    log('info', 'Mem0 调度器关闭');
+  }
+}
+
+// ────────────────────────────── LLM WIKI 全局定时更新 ──────────────────────────────
+// 独立 setTimeout 链（镜像 mem0）；到点只把启用资产依次追加到统一持久化队列。
+// 任务的真正串行、错误隔离与重启恢复均由 wiki-queue 负责，不读取资产流程状态判断结束。
+
+/** 到点执行：为全部 enabled 资产追加更新任务；当前人工任务或资产化任务不会被跳过或并发。 */
+async function wikiRunScheduled() {
+  const enabled = wikiAssets.listAssetsW().filter((a) => a.enabled);
+  if (!enabled.length) { log('info', 'Wiki 定时触发：无启用资产，跳过'); return; }
+  for (const a of enabled) {
+    const r = wikiQueue.enqueue({ type: 'update', id: a.id });
+    if (!r.ok) log('warn', `Wiki 定时入队失败 ${a.name}: ${r.reason}`);
+    else log('info', `Wiki 定时已入队 ${a.name}（${a.id}），队列位置 ${r.position}`);
+  }
+}
+
+function armWikiTimer(fromTrigger = false) {
+  wikiNextRunAt = computeNextRunGeneric(config.wikiUpdate || {}, wikiNextRunAt);
+  const delay = Math.max(1000, wikiNextRunAt - Date.now());
+  const when = `${new Date(wikiNextRunAt).toLocaleString('zh-CN', { hour12: false })}（${Math.round(delay / 60000)} 分钟后）`;
+  log('info', fromTrigger ? `Wiki 定时触发完成，下次更新 ${when}` : `Wiki 调度器已就绪：下次更新 ${when}`);
+  wikiTimer = setTimeout(async () => {
+    if (config.wikiUpdate?.enabled && config.wikiUpdate.mode === 'sched') {
+      await wikiRunScheduled();
+      // 无论是否跑完都重排——跳过/失败不消失
+      if (config.wikiUpdate?.enabled && config.wikiUpdate.mode === 'sched') armWikiTimer(true);
+    }
+  }, delay);
+}
+
+/** LLM WIKI 调度器停止：清理 setTimeout 与 nextRunAt。不碰 TDB/Mem0 状态。 */
+function stopWikiScheduler() {
+  if (wikiTimer) { clearTimeout(wikiTimer); wikiTimer = null; }
+  wikiNextRunAt = null;
+}
+
+/** LLM WIKI 调度器启动：根据 config.wikiUpdate 决定 arm 或关闭。 */
+function applyWikiScheduler() {
+  stopWikiScheduler();
+  if (config.wikiUpdate?.enabled && config.wikiUpdate.mode === 'sched') {
+    armWikiTimer();
+  } else {
+    wikiNextRunAt = null;
+    log('info', 'Wiki 调度器关闭');
+  }
+}
+
+// ────────────────────────────── 模型切换 ──────────────────────────────
+// ── yaml 改写纯函数（llm 2空格 / embedding 4空格；数字裸写、字符串 JSON 引号）──
+function applyYamlEdit(yaml, key, value, indent) {
+  const pad = ' '.repeat(indent);
+  const re = new RegExp(`^(${pad}${key}:\\s*).*$`, 'm');
+  const rendered = typeof value === 'number' ? String(value) : JSON.stringify(String(value));
+  return yaml.replace(re, `$1${rendered}`);
+}
+function rewriteModelYaml(yaml, model, embedding, timeoutMs, recallTimeoutMs) {
+  let out = yaml;
+  if (model?.baseUrl !== undefined) out = applyYamlEdit(out, 'baseUrl', model.baseUrl, 2);
+  if (model?.apiKey !== undefined) out = applyYamlEdit(out, 'apiKey', model.apiKey, 2);
+  if (model?.model !== undefined) out = applyYamlEdit(out, 'model', model.model, 2);
+  if (timeoutMs !== undefined) out = applyYamlEdit(out, 'timeoutMs', timeoutMs, 2);
+  if (recallTimeoutMs !== undefined) out = applyYamlEdit(out, 'timeoutMs', recallTimeoutMs, 4);
+  if (embedding) {
+    if (embedding.provider !== undefined) out = applyYamlEdit(out, 'provider', embedding.provider, 4);
+    if (embedding.baseUrl !== undefined) out = applyYamlEdit(out, 'baseUrl', embedding.baseUrl, 4);
+    if (embedding.apiKey !== undefined) out = applyYamlEdit(out, 'apiKey', embedding.apiKey, 4);
+    if (embedding.model !== undefined) out = applyYamlEdit(out, 'model', embedding.model, 4);
+    if (embedding.dimensions !== undefined) out = applyYamlEdit(out, 'dimensions', embedding.dimensions, 4);
+  }
+  return out;
+}
+
+/** 校验 /api/model 请求体：完整 model（model+baseUrl）或仅 embedding（至少一项有效）都放行；
+ *  空提交（既无 model 也无有效 embedding）拒绝。用户指出功能缺失——改 embedding 无入口生效，
+ *  放宽后允许仅提交 embedding（只改 memory.embedding 段 + 重启 core，不碰 llm）。 */
+function validateModelBody(body) {
+  const b = body || {};
+  if (b.model && b.baseUrl) return { ok: true };
+  if (b.embedding && (b.embedding.model || b.embedding.baseUrl || b.embedding.provider || b.embedding.dimensions !== undefined)) return { ok: true };
+  return { ok: false, reason: '缺少 model / baseUrl，或有效的 embedding 配置' };
+}
+
+/** 生成模型切换操作详情描述（供日志记录；无变化返回空串——不产生噪音日志）。
+ *  @param {object} oldCfg 切换前 config.model（含 model/embedding/timeoutMs）
+ *  @param {object} model 目标 llm 段（{model,...}）
+ *  @param {object} [embedding] 目标 embedding 段
+ *  @param {number} [timeoutMs] 目标 llm 超时
+ *  @returns {string} 如 `模型切换 Qwen3.8-27B-4bit → Qwen3.8-27B-4bit-v2`（可含 embedding/超时变化段） */
+function describeModelChange(oldCfg, model, embedding, timeoutMs) {
+  const parts = [];
+  const oldModel = oldCfg?.model, newModel = model?.model;
+  if (oldModel !== newModel && (oldModel || newModel)) {
+    parts.push(`模型 ${oldModel || '(无)'} → ${newModel || '(无)'}`);
+  }
+  const oldEmb = oldCfg?.embedding?.model, newEmb = embedding?.model;
+  if (oldEmb !== newEmb && (oldEmb || newEmb)) {
+    parts.push(`embedding ${oldEmb || '(无)'} → ${newEmb || '(无)'}`);
+  }
+  const oldT = oldCfg?.timeoutMs, newT = timeoutMs;
+  if (oldT !== newT && newT !== undefined) {
+    parts.push(`超时 ${oldT ?? '(默认)'}ms → ${newT}ms`);
+  }
+  return parts.join('；');
+}
+
+async function applyModel(model, embedding, timeoutMs, recallTimeoutMs) {
+  const prevModel = config.model;
+  // 1. 备份
+  try { fs.copyFileSync(GATEWAY_YAML, GATEWAY_YAML_BAK); } catch {}
+  // 2. 改写 llm 段（缩进 2 空格）+ embedding 段（缩进 4 空格）+ llm.timeoutMs + recall.timeoutMs
+  try {
+    const yaml = fs.readFileSync(GATEWAY_YAML, 'utf8');
+    const next = rewriteModelYaml(yaml, model, embedding, timeoutMs, recallTimeoutMs);
+    if (next === yaml) return { ok: false, reason: 'yaml 无变化（键未找到？）' };
+    fs.writeFileSync(GATEWAY_YAML, next, 'utf8');
+  } catch (e) { return { ok: false, reason: `改写 yaml 失败: ${e.message}` }; }
+  // 3. 重启 core
+  const r = await restartCore();
+  if (!r.ok) return { ok: false, reason: `yaml 已改但 core 重启失败: ${r.reason}` };
+  // 4. 持久化配置（含 embedding / timeoutMs / recallTimeoutMs；presets 由 saveModelPresets 管理，这里不覆盖）
+  config.model = { ...config.model, ...(model || {}), embedding: embedding || config.model.embedding, timeoutMs: timeoutMs ?? config.model.timeoutMs, recallTimeoutMs: recallTimeoutMs ?? config.model.recallTimeoutMs };
+  saveConfig(config);
+  // 5. 操作详情日志（用户反馈 8126 日志只记"已重启"无操作内容）
+  const detail = describeModelChange(prevModel, model, embedding, timeoutMs);
+  if (detail) log('ok', `模型切换成功：${detail}`);
+  return { ok: true };
+}
+
+// ── 预设持久化（存 config.model.presets）──
+function readModelPresets() {
+  // 统一 LLM 总表从磁盘读（runner 资产化并入/资产 resolve 都会写盘；避免内存 stale）
+  return llmPresets.readMaster();
+}
+/** 一次性迁移：旧 Wiki 摄入预设（config.model.wikiModelPresets）并入统一 LLM 总表（model.presets）。
+ *  规则（llm-presets.migrateLegacyPresets）：缺失名整体并入；同名只回填总表缺失字段（总表值不动）；
+ *  迁移后清除旧 key 防重复合并。日志留痕改/增/回填明细。 */
+function migrateLegacyWikiPresets() {
+  try {
+    const old = config.model?.wikiModelPresets;
+    if (!Array.isArray(old) || !old.length) return;
+    const r = llmPresets.migrateLegacyPresets(config, (m) => log('info', m));
+    delete config.model.wikiModelPresets;   // migrateLegacyPresets 已删，双保险
+    saveConfig(config);
+    log('info', `旧 Wiki 摄入预设迁移完成（新增 ${r.added.length} 条，回填 ${Object.keys(r.backfilled).length} 条）`);
+  } catch (e) { log('warn', '迁移旧 Wiki 摄入预设失败: ' + String(e && e.message || e)); }
+}
+function saveModelPresets(list, cfgPath = CONFIG_PATH) {
+  const clean = Array.isArray(list) ? list.filter((p) => p && p.name && p.baseUrl && p.model) : [];
+  config.model = { ...config.model, presets: clean };
+  // 显式 cfgPath（如测试临时目录）只写该路径，绝不碰真实 CONFIG_PATH（含 userKey 密钥）
+  if (cfgPath && cfgPath !== CONFIG_PATH) {
+    let disk = {};
+    try { disk = JSON.parse(fs.readFileSync(cfgPath, 'utf8')); } catch {}
+    disk.model = { ...(disk.model || {}), presets: clean };
+    fs.writeFileSync(cfgPath, JSON.stringify(disk, null, 2) + '\n', 'utf8');
+  } else {
+    saveConfig(config);
+  }
+  return clean;
+}
+
+/** Embedding 预设持久化（镜像 model.presets 的增删改：存 config.model.embeddingPresets）。
+ *  @param {Array} list 预设数组（过滤缺 name/provider/model 的项）
+ *  @param {string} [cfgPath] 显式测试路径（只写该路径，绝不碰真实 CONFIG_PATH） */
+function saveEmbeddingPresets(list, cfgPath = CONFIG_PATH) {
+  const clean = Array.isArray(list) ? list.filter((p) => p && p.name && p.model) : [];
+  config.model = { ...config.model, embeddingPresets: clean };
+  if (cfgPath && cfgPath !== CONFIG_PATH) {
+    let disk = {};
+    try { disk = JSON.parse(fs.readFileSync(cfgPath, 'utf8')); } catch {}
+    disk.model = { ...(disk.model || {}), embeddingPresets: clean };
+    fs.writeFileSync(cfgPath, JSON.stringify(disk, null, 2) + '\n', 'utf8');
+  } else {
+    saveConfig(config);
+  }
+  return clean;
+}
+
+/** Wiki 摄入模型预设持久化（对齐 embeddingPresets 模式：存 config.model.wikiModelPresets）。
+ *  修复 2026-09-20：前端 /api/wiki-model-presets 依赖此端点（预设下拉空 = 后端缺口）。
+ *  @param {Array} list 预设数组（过滤缺 name/model 的项；baseUrl/apiKey/maxTokens 可选）
+ *  @param {string} [cfgPath] 显式测试路径（只写该路径，绝不碰真实 CONFIG_PATH） */
+function saveWikiModelPresets(list, cfgPath = CONFIG_PATH) {
+  const clean = Array.isArray(list) ? list.filter((p) => p && p.name && p.model) : [];
+  config.model = { ...config.model, wikiModelPresets: clean };
+  if (cfgPath && cfgPath !== CONFIG_PATH) {
+    let disk = {};
+    try { disk = JSON.parse(fs.readFileSync(cfgPath, 'utf8')); } catch {}
+    disk.model = { ...(disk.model || {}), wikiModelPresets: clean };
+    fs.writeFileSync(cfgPath, JSON.stringify(disk, null, 2) + '\n', 'utf8');
+  } else {
+    saveConfig(config);
+  }
+  return clean;
+}
+
+/** Wiki 摄入模型默认种子预设（存储为空时兜底，不落盘）。
+ *  修复 2026-09-20 (t9 B)：wikiModelPresets 空 → 下拉空白，返回内置常用预设。 */
+function wikiModelSeedPresets() {
+  return [
+    { name: '本地 Qwen3.8-27B', model: 'Qwen3.8-27B-4bit', baseUrl: 'http://127.0.0.1:18088/v1', apiKey: '<API_KEY>', maxTokens: 32768 },
+    { name: 'sensenova deepseek-v4-flash', model: 'deepseek-v4-flash', baseUrl: 'https://token.sensenova.cn/v1', apiKey: '', maxTokens: 32768 },
+  ];
+}
+
+/** 写 MemoryKnowledge/.env（Wiki 摄入模型）。修复 2026-09-20 (t9 A)：POST 占位 → 真实实现。
+ *  备份 .env → 原子改写 4 键 → 校验。envPath 可注入（沙盒/测试用临时路径，绝不碰生产）。
+ *  @returns {{ok:boolean, reason?:string, changed?:string[]}} */
+function saveKsEnv(envPath, patch) {
+  const p = envPath || path.join(BASE, 'MemoryKnowledge', '.env');
+  if (!fs.existsSync(p)) return { ok: false, reason: `.env 不存在: ${p}` };
+  const model = (patch.model || '').trim();
+  if (!model) return { ok: false, reason: 'model 必填' };
+  if (patch.baseUrl && !/^https?:\/\//.test(patch.baseUrl.trim())) return { ok: false, reason: 'baseUrl 需为 http(s):// 开头' };
+  const raw = fs.readFileSync(p, 'utf8');
+  const lines = raw.split('\n');
+  const kv = { LLM_MODEL: model, LLM_BASE_URL: patch.baseUrl, LLM_API_KEY: patch.apiKey, LLM_MAX_TOKENS: patch.maxTokens };
+  const changed = [];
+  const out = lines.map((line) => {
+    const m = line.match(/^([A-Z0-9_]+)=(.*)$/);
+    if (!m || !(m[1] in kv) || kv[m[1]] === undefined) return line;
+    const v = String(kv[m[1]]);
+    if (line !== `${m[1]}=${v}`) changed.push(`${m[1]}: ${line.split('=')[1]} → ${v}`);
+    return `${m[1]}=${v}`;
+  });
+  const missing = Object.keys(kv).filter((k) => kv[k] !== undefined && !out.some((l) => l.startsWith(k + '=')));
+  for (const k of missing) { out.push(`${k}=${kv[k]}`); changed.push(`${k}: (新增) → ${kv[k]}`); }
+  fs.writeFileSync(p, out.join('\n'), 'utf8');
+  return { ok: true, changed };
+}
+
+/** Wiki 摄入模型预设种子兜底 + 读写（修复 t9 B：空存储返回种子，不落盘）。 */
+function readWikiModelPresets() {
+  const stored = config.model?.wikiModelPresets;
+  return Array.isArray(stored) && stored.length ? stored : wikiModelSeedPresets();
+}
+
+function restartCore() {
+  return new Promise((resolve) => {
+    try {
+      const pid = spawnSync('lsof', ['-tiTCP:8420', '-sTCP:LISTEN', '-n', '-P'], { encoding: 'utf8' }).stdout.trim();
+      if (pid) spawnSync('kill', [pid]);
+    } catch {}
+    // 起新 core（对齐 tdai-local.sh 的 cmd_core：cd MemoryCore && node --import tsx src/gateway/server.ts）
+    // MOD-009：必须带 TDAI_GATEWAY_CONFIG 指向 tdai-gateway.local.yaml，否则 core fallback 到
+    // 默认 dataDir（~/.memory-tencentdb）因沙箱 EPERM 启动失败 → 8420 30s 未就绪 → 报"core 重启失败"。
+    const env = {
+      ...process.env,
+      PATH: [path.dirname(NODE22), '/opt/homebrew/bin', process.env.PATH].filter(Boolean).join(':'),
+      TDAI_GATEWAY_CONFIG: GATEWAY_YAML,
+    };
+    try {
+      const child = spawn(NODE22, ['--import', 'tsx', CORE_ENTRY], {
+        cwd: path.join(BASE, 'MemoryCore'), env, detached: true, stdio: 'ignore',
+      });
+      child.unref();
+    } catch (e) { resolve({ ok: false, reason: String(e) }); return; }
+    const t0 = Date.now();
+    const poll = setInterval(() => {
+      if (isPortUpSync(8420)) {
+        clearInterval(poll);
+        log('ok', `core 已重启（${Date.now() - t0}ms）`);
+        resolve({ ok: true });
+      } else if (Date.now() - t0 > 30000) {
+        clearInterval(poll);
+        resolve({ ok: false, reason: 'core 30s 内未就绪' });
+      }
+    }, 800);
+  });
+}
+
+// ────────────────────────────── HTTP 服务 ──────────────────────────────
+function json(res, code, obj) {
+  res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type', 'access-control-allow-methods': 'GET,POST,OPTIONS' });
+  res.end(JSON.stringify(obj));
+}
+
+// ── 阶段1：KS(8421) 只读查询（x-tdai-service-id 头，wiki/cg 同鉴权）──
+const KS_URL = process.env.TDAI_KS_URL || 'http://127.0.0.1:8421';
+async function ksPost(path, body) {
+  const r = await fetch(`${KS_URL}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-tdai-service-id': 'default' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`KS ${path} HTTP ${r.status}`);
+  const j = await r.json().catch(() => ({}));
+  return (j.data && j.data.items) || j.data || [];
+}
+
+// 引用校验：livePages=[{id,title}]（page/ls 实时）；返回 ref 三态
+function refState(ref, livePages) {
+  if (livePages.some((p) => p.id === ref.id)) return { ref: 'ok', refTo: null };
+  const byTitle = livePages.find((p) => p.title === ref.titleAtSave);
+  if (byTitle) return { ref: 'drift', refTo: byTitle.id };
+  return { ref: 'gone', refTo: null };
+}
+
+// pages 视图：page/ls 实时页 + 本地标签合并 + 断链三态
+async function wikiMapPages(wikiId) {
+  try {
+    const live = await ksPost('/v3/wiki/page/ls', { wiki_id: wikiId });
+    const local = maps.loadMaps('wiki');
+    const pages = live.map((p) => {
+      const labels = [];
+      for (const [lb, refs] of Object.entries(local.labels)) {
+        const r = refs.find((x) => x.wiki_id === wikiId && x.id === p.id);
+        if (r) labels.push(lb);
+      }
+      return { id: p.id, title: p.title, type: p.type || 'other', path: p.path || '', labels };
+    });
+    // 断链三态：本地引用对应的来源对象（页或已消失页）
+    const issues = [];
+    for (const [lb, refs] of Object.entries(local.labels)) {
+      for (const r of refs) {
+        if (r.wiki_id !== wikiId) continue;
+        const st = refState(r, live);
+        if (st.ref !== 'ok') issues.push({ label: lb, id: r.id, titleAtSave: r.titleAtSave, ...st });
+      }
+    }
+    return { ok: true, wiki_id: wikiId, pages, total: pages.length, issues };
+  } catch (e) {
+    return { ok: true, wiki_id: wikiId, pages: [], total: 0, issues: [], reason: String((e && e.message) || e) };
+  }
+}
+
+// validate：全量扫该 wiki 引用 → summary + items
+async function wikiMapValidate(wikiId) {
+  try {
+    const live = await ksPost('/v3/wiki/page/ls', { wiki_id: wikiId });
+    const local = maps.loadMaps('wiki');
+    const items = [];
+    for (const [lb, refs] of Object.entries(local.labels)) {
+      for (const r of refs) {
+        if (r.wiki_id !== wikiId) continue;
+        const st = refState(r, live);
+        if (st.ref !== 'ok') items.push({ label: lb, id: r.id, titleAtSave: r.titleAtSave, ...st });
+      }
+    }
+    const summary = { drift: items.filter((i) => i.ref === 'drift').length, gone: items.filter((i) => i.ref === 'gone').length };
+    return { ok: true, wiki_id: wikiId, summary, items };
+  } catch (e) {
+    return { ok: true, wiki_id: wikiId, summary: { drift: 0, gone: 0 }, items: [], reason: String((e && e.message) || e) };
+  }
+}
+
+/** 断链引用一键修复（t9 D）：drift（titleAtSave 匹配到新 id）→ 重挂映射到新 id；gone 不修。
+ *  @returns {{ok:boolean, fixed:number, skipped:number, items:Array}} */
+async function wikiMapFix(wikiId) {
+  try {
+    const live = await ksPost('/v3/wiki/page/ls', { wiki_id: wikiId });
+    const local = maps.loadMaps('wiki');
+    const fixed = [];
+    const skipped = [];
+    for (const [lb, refs] of Object.entries(local.labels)) {
+      for (const r of refs) {
+        if (r.wiki_id !== wikiId) continue;
+        const st = refState(r, live);
+        if (st.ref === 'ok') continue;
+        if (st.ref === 'drift' && st.refTo) {
+          // 重挂：新 id 保留 titleAtSave，删除旧引用
+          maps.removeLabelRef('wiki', lb, wikiId, r.id);
+          maps.addLabelRef('wiki', lb, { wikiId, id: st.refTo, titleAtSave: r.titleAtSave });
+          fixed.push({ label: lb, from: r.id, to: st.refTo });
+        } else {
+          skipped.push({ label: lb, id: r.id, ref: st.ref });
+        }
+      }
+    }
+    return { ok: true, wiki_id: wikiId, fixed: fixed.length, skipped: skipped.length, fixedItems: fixed, skippedItems: skipped };
+  } catch (e) {
+    return { ok: false, reason: String((e && e.message) || e) };
+  }
+}
+
+/** 定位 cg 的 codegraph 索引 DB（t9b CG-NODES）：dataRoot/<service>/<team>/<cgId>/.codegraph/codegraph.db
+ *  dataRoot 可用 SANDBOX_KS_DATA_ROOT env 覆盖（沙盒隔离）。 */
+async function findCgIndexDb(cgId) {
+  try {
+    const roots = [];
+    if (process.env.SANDBOX_KS_DATA_ROOT) roots.push(process.env.SANDBOX_KS_DATA_ROOT);
+    roots.push(path.join(BASE, 'MemoryKnowledge', 'data'));
+    for (const root of roots) {
+      const walk = (dir, depth) => {
+        if (depth > 3) return null;
+        let entries = [];
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return null; }
+        for (const e of entries) {
+          const full = path.join(dir, e.name);
+          if (e.isDirectory()) {
+            if (e.name === cgId) {
+              const db = path.join(full, '.codegraph', 'codegraph.db');
+              return fs.existsSync(db) ? db : null;
+            }
+            const found = walk(full, depth + 1);
+            if (found) return found;
+          }
+        }
+        return null;
+      };
+      const found = walk(root, 0);
+      if (found) return found;
+    }
+    return null;
+  } catch { return null; }
+}
+
+/** 从 codegraph 索引 DB 读节点（t9b CG-NODES）：nodes 表 id/kind/name/file_path。 */
+function queryCgNodes(dbPath) {
+  return new Promise((resolve, reject) => {
+    try {
+      const Database = require2('better-sqlite3');
+      const db = new Database(dbPath, { readonly: true });
+      const rows = db.prepare('SELECT id, kind, name, file_path FROM nodes ORDER BY kind, name').all();
+      db.close();
+      resolve(rows);
+    } catch (e) { reject(e); }
+  });
+}
+
+async function listAssets(type) {
+  const kind = type === 'codegraph' ? 'codegraph' : 'wiki';
+  try {
+    const items = await teamAssets(type === 'codegraph' ? 'code-graph' : 'wiki');
+    const local = maps.loadMaps(kind);
+    const out = items.map((a) => {
+      const id = a.knowledge_id || a.wiki_id || a.code_graph_id || a.asset_id || a.id || '';
+      return {
+        wiki_id: kind === 'wiki' ? id : undefined,
+        code_graph_id: kind === 'codegraph' ? id : undefined,
+        name: a.name || a.wiki_name || a.repo_name || a.title || id,
+        status: a.status || 'ready',
+        page_count: a.page_count ?? a.pageCount ?? null,
+        managed: !!(local.assets[id] && local.assets[id].managed),
+      };
+    });
+    return { ok: true, items: out, total: out.length };
+  } catch (e) {
+    return { ok: true, items: [], total: 0, reason: String((e && e.message) || e) };
+  }
+}
+
+function readBody(req) {
+  return new Promise((resolve) => {
+    let d = '';
+    req.on('data', (c) => { d += c; if (d.length > 2_000_000) req.destroy(); });
+    req.on('end', () => { try { resolve(d ? JSON.parse(d) : {}); } catch { resolve({}); } });
+  });
+}
+
+// LLM WIKI 资产骨架判定：scripts/ + config.yaml + prompts/ + schema/ 齐备（与 assetize.py is_asset 一致）
+function isAssetSkeleton(target) {
+  try {
+    return ['scripts', 'config.yaml', 'prompts', 'schema'].every(name => fs.existsSync(path.join(target, name)));
+  } catch { return false; }
+}
+
+// 系统文件夹选择器（macOS 原生弹窗）：异步 spawn osascript，前端轮询结果
+let wikiPick = null; // {path|null, done, ts}
+function pickFolder() {
+  wikiPick = null;
+  const child = spawn('osascript', ['-e', 'POSIX path of (choose folder)'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  child.stdout.on('data', (c) => { out += c; });
+  child.on('exit', (code) => { wikiPick = { path: code === 0 ? out.trim() : null, done: true, ts: Date.now() }; });
+  child.on('error', () => { wikiPick = { path: null, done: true, ts: Date.now() }; });
+}
+
+function getStatus() {
+  return {
+    services: {
+      core: isPortUpSync(8420), knowledge: isPortUpSync(8421), panel: isPortUpSync(8123),
+      proxy: isPortUpSync(8096), console: true,
+    },
+    scheduler: { ...config.scheduler, nextRunAt },
+    importRunning,
+    lastImport,
+    model: config.model,
+    importConfig: config.import,
+    sniffed: sniffIdsFromState(),
+  };
+}
+
+/** 超时配置清单（用户原则 2026-09-08：可配置的单独显示+可改，硬编码的只显示信息不提供修改）。
+ *  每项 {key,label,value,unit,editable,source}；embedding 段无 timeoutMs 配置，按用户指示不显示。 */
+function collectTimeoutInfo(cfg) {
+  const c = cfg || {};
+  return [
+    { key: 'llm.timeoutMs', label: '解析 LLM 超时', value: c.model?.timeoutMs ?? 720000, unit: 'ms', editable: true, source: 'tdai-gateway.local.yaml llm.timeoutMs（面板可改）' },
+    { key: 'memory.recall.timeoutMs', label: '记忆召回超时', value: c.model?.recallTimeoutMs ?? 5000, unit: 'ms', editable: true, source: 'yaml memory.recall.timeoutMs（面板可改，默认 5000）' },
+    { key: 'import.importTimeoutMs', label: '控制台导入超时', value: c.import?.importTimeoutMs ?? 1800000, unit: 'ms', editable: true, source: 'console-config.json import.importTimeoutMs（面板可改，默认 30min）' },
+    { key: 'l1.extract', label: 'L1 解析超时', value: 720000, unit: 'ms', editable: false, source: '代码硬编码（l1-extractor.ts，不吃 yaml）' },
+    { key: 'l1.dedup', label: 'L1 去重超时', value: 720000, unit: 'ms', editable: false, source: '代码硬编码（l1-dedup.ts，不吃 yaml）' },
+    { key: 'l3.persona', label: 'L3 persona 超时', value: 720000, unit: 'ms', editable: false, source: '代码硬编码（persona-generator.ts，注释误导写 180s）' },
+    { key: 'worker.lockTtlMs', label: 'worker 锁 TTL', value: 600000, unit: 'ms', editable: false, source: '代码硬编码（锁 10min 超时）' },
+    { key: 'worker.lockRetry', label: 'worker 锁重试上限', value: '15+40 次 ≈27.5min', unit: '', editable: false, source: '代码硬编码（等锁重试策略）' },
+  ];
+}
+
+const WEB_DIR = path.join(CONSOLE_DIR, 'web');
+function serveStatic(req, res, p) {
+  let file = p === '/' ? 'index.html' : p.replace(/^\/+/, '');
+  let fp = path.join(WEB_DIR, file);
+  if (!fp.startsWith(WEB_DIR)) { json(res, 403, { ok: false }); return; }
+  if (!fs.existsSync(fp) || fs.statSync(fp).isDirectory()) { fp = path.join(WEB_DIR, 'index.html'); }
+  const ext = path.extname(fp);
+  const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml' }[ext] || 'application/octet-stream';
+  res.writeHead(200, { 'content-type': mime });
+  fs.createReadStream(fp).pipe(res);
+}
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const p = url.pathname;
+  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+  // ── deep_search 总表 API（⑧ 集成：唯一写者 Console 内，OV 通道指沙盒 1934，绝不 1933）──
+  if (p === '/search' || p === '/next' || p === '/read' || p === '/status' || p === '/sync' || p.startsWith('/sync/') || p === '/source-catalog' || p === '/source-stats') {
+    if (!globalThis.__dsSearchApi) {
+      const oc = loadConfig();
+      initSearchApi({
+        dbPath: path.join(CONSOLE_DIR, '.data', 'deep-search.db'),
+        wikiAssetsJsonPath: path.join(CONSOLE_DIR, '.dsh', 'wiki-assets.json'),
+        ov: { baseUrl: process.env.DEEP_SEARCH_OV_URL || oc.ovImport?.ovBaseUrl || 'http://127.0.0.1:1933', apiKey: oc.ovImport?.ovApiKey || '' },
+        mem0: { baseUrl: process.env.MEM0_SERVER_URL || 'http://127.0.0.1:8915' },
+        embed: { baseUrl: 'http://<EMBED_HOST>:8810/v1', apiKey: '<API_KEY>', model: 'WeMM-Embedding-2B-MLX-4bit', dimensions: 1024 },
+        config: oc,
+      });
+      globalThis.__dsSearchApi = true;
+    }
+    let b = {};
+    if (req.method === 'POST' || req.headers['content-length']) { try { b = await readBody(req); } catch {} }
+    if (await mountSearchRoutes(req, res, p, b)) return;
+  }
+
+  try {
+    if (req.method === 'GET' && !p.startsWith('/api/') && !p.startsWith('/health')) return serveStatic(req, res, p);
+    if (req.method === 'GET' && p === '/api/status') return json(res, 200, getStatus());
+    // ── OV 导入 / 逐步 commit（DeepSearch 新增板块）──
+    if (req.method === 'GET' && p === '/api/ov/status') return json(res, 200, getOvImport().status());
+    if (req.method === 'GET' && p === '/api/ov/sessions') return json(res, 200, getOvImport().listSessions());
+    if (req.method === 'POST' && p === '/api/ov/run') {
+      const b = await readBody(req);
+      const r = await getOvImport().run(b.importN);
+      return json(res, r.ok ? 200 : 400, r);
+    }
+    if (req.method === 'POST' && p === '/api/ov/pause') return json(res, 200, getOvImport().pause());
+    if (req.method === 'POST' && p === '/api/ov/resume') return json(res, 200, getOvImport().resume());
+    if (req.method === 'POST' && p === '/api/ov/stop') return json(res, 200, getOvImport().stop());
+    if (req.method === 'POST' && p === '/api/ov/reset') return json(res, 200, getOvImport().reset());
+    if (req.method === 'POST' && p === '/api/ov/config') {
+      const b = await readBody(req);
+      const cfg = loadConfig();
+      cfg.ovImport = { ...(cfg.ovImport || {}), ...(b || {}) };
+      saveConfig(cfg);
+      const r = getOvImport().saveConfig(cfg.ovImport);
+      return json(res, 200, { ok: true, ...r });
+    }
+    if (req.method === 'GET' && p === '/api/logs') return json(res, 200, { logs: recentLogs });
+    if (req.method === 'GET' && p === '/api/timeouts') return json(res, 200, { ok: true, items: collectTimeoutInfo(config) });
+
+    if (req.method === 'POST' && p === '/api/config') {
+      const body = await readBody(req);
+      if (body.scheduler) config.scheduler = { ...config.scheduler, ...body.scheduler };
+      if (body.import) config.import = { ...config.import, ...body.import };
+      if (body.model) config.model = { ...config.model, ...body.model };
+      saveConfig(config);
+      applyScheduler();
+      return json(res, 200, { ok: true, config });
+    }
+
+    if (req.method === 'POST' && p === '/api/import') {
+      const body = await readBody(req);
+      const r = await runImport({ force: !!body.force, extract: body.extract, agentId: body.agentId, teamId: body.teamId, workspace: body.workspace, sessionsDir: body.sessionsDir, sessionIds: body.sessionIds });
+      return json(res, r.ok ? 200 : 400, r);
+    }
+
+    if (req.method === 'GET' && p === '/api/sessions') {
+      const dir = url.searchParams.get('dir') || '';
+      const sessionIds = url.searchParams.get('sessionIds') || '';
+      const r = await listSessions(dir, sessionIds);
+      return json(res, r.ok ? 200 : 400, r);
+    }
+
+    if (req.method === 'POST' && p === '/api/model') {
+      const body = await readBody(req);
+      const v = validateModelBody(body);
+      if (!v.ok) return json(res, 400, { ok: false, reason: v.reason });
+      // 仅 embedding 提交（无 model/baseUrl）时 model 传 undefined，避免空对象覆盖 config.model
+      const hasLlm = body.model && body.baseUrl;
+      const r = await applyModel(
+        hasLlm ? { baseUrl: body.baseUrl, apiKey: body.apiKey || '', model: body.model } : undefined,
+        body.embedding || undefined,
+        body.timeoutMs !== undefined ? Number(body.timeoutMs) : undefined,
+        body.recallTimeoutMs !== undefined ? Number(body.recallTimeoutMs) : undefined,
+      );
+      // 一致性：前端同时提交 importTimeoutMs（导入超时），应用成功路径上持久化到 config.import
+      if (r.ok && body.importTimeoutMs !== undefined) {
+        config.import = { ...config.import, importTimeoutMs: Number(body.importTimeoutMs) };
+        saveConfig(config);
+      }
+      return json(res, r.ok ? 200 : 400, r);
+    }
+
+    if (req.method === 'GET' && p === '/api/model-presets') {
+      return json(res, 200, { ok: true, presets: readModelPresets() });
+    }
+    if (req.method === 'POST' && p === '/api/model-presets') {
+      const body = await readBody(req);
+      const presets = saveModelPresets(body.presets);
+      return json(res, 200, { ok: true, presets });
+    }
+
+    // ── OpenViking VLM 配置（读写 ~/.openviking/ov.conf 的 vlm 段）──
+    if (req.method === 'GET' && p === '/api/ov-vlm') {
+      return json(res, 200, { ok: true, vlm: readOvVlm(), defaults: DEFAULT_OV_VLM });
+    }
+    if (req.method === 'POST' && p === '/api/ov-vlm') {
+      const body = await readBody(req);
+      const v = validateOvVlmBody(body);
+      if (!v.ok) return json(res, 400, { ok: false, reason: v.reason });
+      // 只传用户修改的字段，不覆盖未知字段
+      const cur = readOvVlm();
+      const updated = { ...cur };
+      for (const k of ['model','api_key','api_base','temperature','thinking','max_tokens','timeout','max_retries','max_concurrent','reasoning_effort']) {
+        if (body[k] !== undefined) updated[k] = body[k];
+      }
+      const written = writeOvVlm(updated);
+      return json(res, 200, { ok: true, vlm: written, restarted: false });
+    }
+
+    // ── Mem0 解析导入（独立游标 / 进度 / 配置 / 控制 / 记忆总量）──
+    if (req.method === 'GET' && p === '/api/mem0/status') {
+      // fixes: 消费"导入完成待自动激活"标记（exit 回调在顶层设标记，此处 handler 内可调 activateReadyImport）。
+      // status 被前端/插件轮询，导入完成后很快触发，完成 E+ 漏接的自动激活闭环。
+      if (globalThis.__mem0PendingActivateRunId) {
+        const pendingRunId = globalThis.__mem0PendingActivateRunId;
+        globalThis.__mem0PendingActivateRunId = null;
+        // fixes F8：激活失败有界重试（8915 挂死/冷启等瞬时问题）——保留标记，冷却后下轮 status 轮询再试
+        if (globalThis.__mem0ActivateRetryAt && Date.now() < globalThis.__mem0ActivateRetryAt) {
+          globalThis.__mem0PendingActivateRunId = pendingRunId;
+        } else {
+          activateReadyImport(pendingRunId).then((ar) => {
+            if (ar.ok) {
+              log('info', `Mem0 导入完成自动激活（runId=${pendingRunId}）: OK`);
+              globalThis.__mem0ActivateTries = 0;
+            } else {
+              const tries = (globalThis.__mem0ActivateTries || 0) + 1;
+              globalThis.__mem0ActivateTries = tries;
+              if (tries >= 6) {
+                log('warn', `Mem0 自动激活（runId=${pendingRunId}）: FAIL ${ar.reason || ''}（已达 6 次上限，候选保留待手动激活）`);
+              } else {
+                log('warn', `Mem0 自动激活（runId=${pendingRunId}）: FAIL ${ar.reason || ''}（第 ${tries}/6 次，30s 后重试）`);
+                globalThis.__mem0PendingActivateRunId = pendingRunId;
+                globalThis.__mem0ActivateRetryAt = Date.now() + 30_000;
+              }
+            }
+          }).catch((e) => {
+            const tries = (globalThis.__mem0ActivateTries || 0) + 1;
+            globalThis.__mem0ActivateTries = tries;
+            if (tries >= 6) { log('warn', `Mem0 自动激活异常: ${String(e?.message || e)}（放弃）`); }
+            else { log('warn', `Mem0 自动激活异常: ${String(e?.message || e)}（重试 ${tries}/6）`); globalThis.__mem0PendingActivateRunId = pendingRunId; globalThis.__mem0ActivateRetryAt = Date.now() + 30_000; }
+          });
+        }
+      }
+      const st = readMem0State();
+      // fixes: 导入进行中进度读候选 work state（startCandidateImport 写 active done=0 后
+      // runner 只更新候选；active 是 status 读源会卡 0——从 import.lock 定位当前 run 的候选 state 回填）
+      if (st.running) {
+        const lock = readImportLock();
+        if (lock && lock.workDir) {
+          try {
+            const cand = JSON.parse(fs.readFileSync(path.join(lock.workDir, 'mem0-state.json'), 'utf8'));
+            if (cand && typeof cand.done === 'number') {
+              st.done = cand.done; st.total = cand.total; st.currentId = cand.currentId;
+              if (typeof cand.failed === 'number') st.failed = cand.failed;
+            }
+          } catch {}
+        }
+      }
+      // fixes F11: 暴露可重试/可续跑的 runId（前端 retry/resume 带参）；state 未记时从 imports 最新终态 run 推导
+      try {
+        let best = '', bestT = 0;
+        for (const d of fs.readdirSync(MEM0_IMPORTS_ROOT)) {
+          const rp = path.join(MEM0_IMPORTS_ROOT, d, 'work', 'run.json');
+          if (!fs.existsSync(rp)) continue;
+          try {
+            const rj = JSON.parse(fs.readFileSync(rp, 'utf8'));
+            const t = fs.statSync(rp).mtimeMs;
+            if (t > bestT && rj && ['failed', 'partial-completed', 'paused', 'stopped'].includes(rj.outcome)) { best = d; bestT = t; }
+          } catch {}
+        }
+        if (best) st.runId = best;
+      } catch {}
+      return json(res, 200, { ok: true, nextRunAt: mem0NextRunAt, config: { ...DEFAULT_CONFIG.mem0Import, ...(config.mem0Import || {}) }, ...st, ...mem0CountSnapshot() });
+    }
+    if (req.method === 'POST' && p === '/api/mem0/config') {
+      try {
+        const body = await readBody(req);
+        const next = { ...DEFAULT_CONFIG.mem0Import, ...(config.mem0Import || {}), ...(body.mem0Import || {}) };
+        next.intervalMin = Math.max(1, Number(next.intervalMin) || 720);
+        next.batchChars = Math.max(1000, Number(next.batchChars) || 30000);
+        config.mem0Import = next;
+        saveConfig(config);
+        applyMem0Scheduler();
+        return json(res, 200, { ok: true, config: next });
+      } catch (e) { return json(res, 500, { ok: false, reason: (e && e.message) || String(e) }); }
+    }
+    if (req.method === 'GET' && p === '/api/mem0-model') {
+      return json(res, 200, { ok: true, mem0Model: { ...DEFAULT_CONFIG.mem0Model, ...(config.mem0Model || {}) } });
+    }
+    if (req.method === 'POST' && p === '/api/mem0-model') {
+      try {
+        const body = await readBody(req);
+        const next = { ...DEFAULT_CONFIG.mem0Model, ...(config.mem0Model || {}), ...(body.mem0Model || {}) };
+        next.maxTokens = Math.max(256, Number(next.maxTokens) || 20000);
+        config.mem0Model = next;
+        saveConfig(config);
+        return json(res, 200, { ok: true, mem0Model: next });
+      } catch (e) { return json(res, 500, { ok: false, reason: (e && e.message) || String(e) }); }
+    }
+    if (req.method === 'POST' && p === '/api/mem0/write') {
+      // 候选 work 导入（运行锁互斥；激活锁持有中拒绝）+ 生产 resolveLimitRows/untilTs/mem0Child 语义
+      try {
+        const body = await readBody(req);
+        const untilTs = body.untilTs || body.cutoff || '';
+        const limitRows = untilTs ? 0 : resolveLimitRows(body, config.mem0Import || {});
+        const r = await startCandidateImport({ runIdHint: body.runId, untilTs, limitRows, source: 'write' });
+        if (!r.ok) return json(res, 409, r);
+        return json(res, 200, { ok: true, started: true, runId: r.runId, workDir: r.workDir });
+      } catch (e) { return json(res, 500, { ok: false, reason: (e && e.message) || String(e) }); }
+    }
+    if (req.method === 'POST' && p === '/api/mem0/pause') {
+      try {
+        const body = await readBody(req);
+        const lock = readImportLock();
+        const runId = body.runId || (lock && lock.runId);
+        if (!runId) return json(res, 400, { ok: false, reason: 'runId 必填' });
+        const workDir = lock && lock.runId === runId ? lock.workDir : path.join(MEM0_IMPORTS_ROOT, runId, 'work');
+        fs.writeFileSync(path.join(workDir, 'mem0-control.json'), JSON.stringify({ cmd: 'pause', at: Date.now() }));
+        const s = readMem0State(); s.paused = true; s.lastError = '已暂停（游标保留，可继续）'; writeMem0State(s);
+        return json(res, 200, { ok: true });
+      } catch (e) { return json(res, 500, { ok: false, reason: (e && e.message) || String(e) }); }
+    }
+    if (req.method === 'POST' && p === '/api/mem0/stop') {
+      // 禁 pkill：精确 kill runner 子进程（lock.childPid + mem0Child 双记录）；优雅停 30s 超时保留锁+候选
+      try {
+        const body = await readBody(req);
+        const lock = readImportLock();
+        const runId = body.runId || (lock && lock.runId);
+        if (!runId) return json(res, 400, { ok: false, reason: 'runId 必填' });
+        const workDir = lock && lock.runId === runId ? lock.workDir : path.join(MEM0_IMPORTS_ROOT, runId, 'work');
+        fs.writeFileSync(path.join(workDir, 'mem0-control.json'), JSON.stringify({ cmd: 'stop', at: Date.now() }));
+        const target = (lock && lock.childPid) ? lock.childPid : (mem0Child && mem0Child.pid);
+        if (target) {
+          try { process.kill(target, 'SIGTERM'); } catch {}
+          for (let i = 0; i < 300; i++) { if (!pidAlive(target)) break; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); }
+          if (pidAlive(target)) { try { process.kill(target, 'SIGKILL'); } catch {} }
+        }
+        const s = readMem0State(); s.running = false; s.paused = false; s.stoppedByUser = true; s.lastError = '已停止（游标=当前处理位置）'; writeMem0State(s);
+        return json(res, 200, { ok: true });
+      } catch (e) { return json(res, 500, { ok: false, reason: (e && e.message) || String(e) }); }
+    }
+    if (req.method === 'POST' && p === '/api/mem0/resume') {
+      // 同 runId/work 续跑（不 clone active）；仅 paused/stopped 可 resume；mem0Child/interrupted 语义
+      try {
+        const body = await readBody(req);
+        const runId = body.runId;
+        if (!runId) return json(res, 400, { ok: false, reason: 'runId 必填' });
+        if (readActivation()) return json(res, 409, { ok: false, reason: '激活进行中' });
+        if (readImportLock()) return json(res, 409, { ok: false, reason: '已有导入运行中' });
+        const workDir = path.join(MEM0_IMPORTS_ROOT, runId, 'work');
+        const out = candidateOutcome(workDir);
+        if (!out || !['paused', 'stopped'].includes(out.outcome)) {
+          return json(res, 400, { ok: false, reason: '候选不可 resume（outcome=' + (out && out.outcome) + '）' });
+        }
+        try { fs.rmSync(path.join(workDir, 'mem0-control.json'), { force: true }); } catch {}
+        const lock = acquireImportLock(runId, workDir, 'resume');
+        const spawnEnv = { ...process.env, MEM0_WORK_DIR: workDir, MEM0_RUN_ID: runId };
+        ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'no_proxy'].forEach((k) => delete spawnEnv[k]);
+        const child = spawn(mem0Py(), [MEM0_PROD_RUN, '--run-id', runId, '--resume'], { env: spawnEnv, stdio: 'ignore' });
+        mem0Child = child;
+        lock.childPid = child.pid; fs.writeFileSync(MEM0_IMPORT_LOCK, JSON.stringify(lock));
+        child.on('exit', (code, signal) => {
+          if (mem0Child === child) mem0Child = null;
+          const c = candidateOutcome(workDir); const x = readMem0State();
+          x.running = false; x.finishedAt = Date.now(); x.lastCode = code;
+          x.interrupted = !!((signal && !x.stoppedByUser) || (code !== 0 && !x.lastError && !x.paused));
+          // fixes: 候选 state 的 done/total/failed 回填 active（同 write 路由）
+          try {
+            const cand = JSON.parse(fs.readFileSync(path.join(workDir, 'mem0-state.json'), 'utf8'));
+            if (cand && typeof cand.done === 'number') {
+              x.done = cand.done; x.total = cand.total;
+              if (typeof cand.failed === 'number') x.failed = cand.failed;
+              if (cand.failedIds) x.failedIds = cand.failedIds;
+              if (cand.cursorTs) x.cursorTs = cand.cursorTs;
+              if (cand.plannedEndTs) x.plannedEndTs = cand.plannedEndTs;
+              if (cand.runId) x.runId = cand.runId;
+            }
+          } catch {}
+          if (c) { x.lastOutcome = c.outcome; if (['completed','paused','stopped','failed','partial-completed'].includes(c.outcome)) releaseImportLock(); else x.stale = true; } else { releaseImportLock(); }
+          writeMem0State(x);
+        });
+        const s = readMem0State(); delete s.stoppedByUser; writeMem0State({ ...s, running: true, paused: false, startedAt: Date.now() });
+        return json(res, 200, { ok: true, started: true, runId });
+      } catch (e) { return json(res, 500, { ok: false, reason: (e && e.message) || String(e) }); }
+    }
+    if (req.method === 'POST' && p === '/api/mem0/retry') {
+      // 仅重试失败清单：同 work --failed-only；保留 cursor；paused 态防误触
+      try {
+        const body = await readBody(req);
+        const runId = body.runId;
+        if (!runId) return json(res, 400, { ok: false, reason: 'runId 必填' });
+        if (readActivation()) return json(res, 409, { ok: false, reason: '激活进行中' });
+        if (readImportLock()) return json(res, 409, { ok: false, reason: '已有导入运行中' });
+        const workDir = path.join(MEM0_IMPORTS_ROOT, runId, 'work');
+        const out = candidateOutcome(workDir);
+        if (!out || !['failed', 'partial-completed'].includes(out.outcome)) return json(res, 400, { ok: false, reason: '候选不可 retry（outcome=' + (out && out.outcome) + '）' });
+        const st = readMem0State();
+        if (st.paused) return json(res, 400, { ok: false, reason: '已暂停：请先继续或停止，再重试失败' });
+        const failedN = (st.failedIds || []).length;
+        if (!failedN) return json(res, 200, { ok: true, started: false, reason: '失败清单为空' });
+        // fixes F11: 候选已激活（state 移入 active）→ 从 active 克隆新候选跑 --failed-only，绝不直写 active
+        let candState = null;
+        try { candState = JSON.parse(fs.readFileSync(path.join(workDir, 'mem0-state.json'), 'utf8')); } catch {}
+        if (!(candState && (candState.failedIds || []).length)) {
+          const r = await startCandidateImport({ failedOnly: true, source: 'retry' });
+          if (!r.ok) return json(res, 409, r);
+          return json(res, 200, { ok: true, started: true, mode: 'failed-only-clone', failedN, runId: r.runId });
+        }
+        try { fs.rmSync(path.join(workDir, 'mem0-control.json'), { force: true }); } catch {}
+        const lock = acquireImportLock(runId, workDir, 'retry');
+        const spawnEnv = { ...process.env, MEM0_WORK_DIR: workDir, MEM0_RUN_ID: runId };
+        ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'no_proxy'].forEach((k) => delete spawnEnv[k]);
+        const child = spawn(mem0Py(), [MEM0_PROD_RUN, '--run-id', runId, '--failed-only'], { env: spawnEnv, stdio: 'ignore' });
+        mem0Child = child;
+        lock.childPid = child.pid; fs.writeFileSync(MEM0_IMPORT_LOCK, JSON.stringify(lock));
+        child.on('exit', (code, signal) => {
+          if (mem0Child === child) mem0Child = null;
+          const c = candidateOutcome(workDir); const x = readMem0State();
+          x.running = false; x.finishedAt = Date.now(); x.lastCode = code;
+          x.interrupted = !!((signal && !x.stoppedByUser) || (code !== 0 && !x.lastError && !x.paused));
+          // fixes: 候选 state 的 done/total/failed 回填 active（同 write 路由）
+          try {
+            const cand = JSON.parse(fs.readFileSync(path.join(workDir, 'mem0-state.json'), 'utf8'));
+            if (cand && typeof cand.done === 'number') {
+              x.done = cand.done; x.total = cand.total;
+              if (typeof cand.failed === 'number') x.failed = cand.failed;
+              if (cand.failedIds) x.failedIds = cand.failedIds;
+              if (cand.cursorTs) x.cursorTs = cand.cursorTs;
+              if (cand.plannedEndTs) x.plannedEndTs = cand.plannedEndTs;
+              if (cand.runId) x.runId = cand.runId;
+            }
+          } catch {}
+          if (c) { x.lastOutcome = c.outcome; if (['completed','paused','stopped','failed','partial-completed'].includes(c.outcome)) releaseImportLock(); else x.stale = true; } else { releaseImportLock(); }
+          writeMem0State(x);
+        });
+        const ss = readMem0State(); delete ss.stoppedByUser; writeMem0State({ ...ss, running: true, paused: false, startedAt: Date.now(), total: failedN, done: 0, currentId: '', lastError: '' });
+        // fixes F7a: 同 write 路由——重置候选 state 为本次起点（retry 复用 workDir，候选残留上次 done）
+        try { const cs = { ...ss, running: false, paused: false, startedAt: Date.now(), total: failedN, done: 0, currentId: '', lastError: '' }; delete cs.stoppedByUser; fs.writeFileSync(path.join(workDir, 'mem0-state.json'), JSON.stringify(cs)); } catch {}
+        return json(res, 200, { ok: true, started: true, mode: 'failed-only', failedN });
+      } catch (e) { return json(res, 500, { ok: false, reason: (e && e.message) || String(e) }); }
+    }
+async function mem0SearchHttp(body, timeoutMs = 3000) {
+  // 常驻服务不可达快速失败（connect refused 立即抛，不阻塞）
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const resp = await fetch(`${MEM0_SERVER}/search`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: ctrl.signal });
+    // fixes F4: 统一先解析 body（避免 503 source 不可用退化为 fallback）
+    const data = await resp.json().catch(() => null);
+    if (resp.status === 503 && data && data.source) return data; // activating/recovering 由调用方区分
+    if (!resp.ok) {
+      // 保留 500 错误体（Error finding id 检测需要 error 字段）
+      if (resp.status === 500 && data && typeof data.error === 'string') return data;
+      return null;
+    }
+    return data && data.ok === true ? data : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+}
+// ── fixes F5: 活动 8915 一次有界自恢复（Error finding id → 重启一次 → 重试）──
+
+function listeningPids(port) {
+  try {
+    const r = spawnSync('lsof', ['-iTCP:' + port, '-sTCP:LISTEN', '-n', '-P'], { encoding: 'utf8' });
+    const pids = [];
+    for (const line of (r.stdout || '').split('\n').slice(1)) {
+      const m = line.trim().match(/^\S+\s+(\d+)/);
+      if (m) pids.push(Number(m[1]));
+    }
+    return pids;
+  } catch { return []; }
+}
+function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
+function cmdMatches(pid) {
+  try {
+    const r = spawnSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' });
+    // fixes: 沙盒经 bootstrap(run_search_server.py) 启服务，命令行不含 server.py；
+    // 生产不设 MEM0_OWNER_CMD_MATCH=用原生匹配串，零影响
+    const needle = process.env.MEM0_OWNER_CMD_MATCH || 'mem0-search-server.py';
+    return (r.stdout || '').includes(needle);
+  } catch { return false; }
+}
+async function mem0HealthOk(port) {
+  try {
+    const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 3000);
+    const resp = await fetch('http://127.0.0.1:' + port + '/health', { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!resp.ok) return false;
+    const d = await resp.json().catch(() => null);
+    return !!(d && d.ok === true && d.queryReady === true);
+  } catch { return false; }
+}
+function adoptMem0SearchServer(port) {
+  // 认领：恰好一个 LISTEN PID + ps 匹配 + /health ok → 写 owner
+  // fixes: MEM0_OWNER_TRUST_PORT=1（沙盒）时跳过 ps 校验（DSH 文件沙盒拦截 ps 读其他进程，
+  // 沙盒端口所有者只可能是本测试拉起）；生产不设=保留 ps 校验
+  const trustPort = process.env.MEM0_OWNER_TRUST_PORT === '1';
+  const pids = listeningPids(port);
+  if (pids.length !== 1) return { ok: false, reason: 'unmanaged-server' };
+  const pid = pids[0];
+  if (!trustPort && !cmdMatches(pid)) return { ok: false, reason: 'unmanaged-server' };
+  let cmd = '';
+  if (!trustPort) cmd = spawnSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' }).stdout || '';
+  const owner = { pid, port, mode: 'adopted', commandHash: trustPort ? 'sandbox-trust' : crypto.createHash('sha256').update(cmd).digest('hex') };
+  writeOwner(owner);
+  return { ok: true, owner };
+}
+async function refreshMem0Owner(port) {
+  // F6: 快速路径复查唯一 listener + health 后才复用；否则重认领
+  const owner = readOwner();
+  const pids = listeningPids(port);
+  if (owner && pidAlive(owner.pid) && cmdMatches(owner.pid)
+      && pids.length === 1 && pids[0] === owner.pid && await mem0HealthOk(port)) {
+    return { ok: true, owner };
+  }
+  return adoptMem0SearchServer(port);
+}
+function stopManagedMem0SearchServer(port) {
+  const owner = readOwner();
+
+  try {
+    process.kill(owner.pid, 'SIGTERM');
+    // 等至多 5 秒
+    for (let i = 0; i < 50; i++) {
+      if (!pidAlive(owner.pid)) return true;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    }
+  } catch {}
+  try { process.kill(owner.pid, 'SIGKILL'); for (let i = 0; i < 20; i++) { if (!pidAlive(owner.pid)) return true; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); } } catch {}
+  // fixes F10: 进程已退（zombie/竞态下 pidAlive 可能短暂为 true）但端口已释放 → 视为停止成功
+  return !pidAlive(owner.pid) || listeningPids(port).length === 0;
+}
+async function spawnMem0SearchServerFromActive(port, logPath) {
+  const py = process.env.MEM0_VENV_PY || process.env.MEM0_PY || path.join(MEM0_ROOT, 'venv', 'bin', 'python');
+  const server = process.env.MEM0_SEARCH_SERVER_BOOTSTRAP || process.env.MEM0_SEARCH_SERVER_PY || MEM0_SEARCH_SERVER_PY;
+  const env = { ...process.env, MEM0_SANDBOX_ROOT: MEM0_ROOT, MEM0_SANDBOX_CHROMA: path.join(MEM0_ROOT, 'chroma-data'),
+                MEM0_PROBE_RECORDS: path.join(MEM0_ROOT, 'probe-records.jsonl') };
+  const child = spawn(py, [server, '--port', String(port)], { env, stdio: 'ignore', detached: true });
+  child.unref();
+  // fixes: spawn error 必须处理（ENOENT 等否则未捕获崩溃 console）
+  child.on('error', () => {});
+  writeOwner({ pid: child.pid, port, mode: 'spawned', commandHash: '' });
+  return child;
+}
+// ── fixes Task 4: 候选预检 + 激活（journal 文件级回滚）──
+function activePath(n) { return path.join(MEM0_ROOT, n); }
+function candidatePath(workDir, n) { return path.join(workDir, n); }
+
+async function preflightCandidate(workDir) {
+  // 起临时 search server 于预检端口；require health queryReady + validationQuery 检索 ≥1
+  // fixes F11: partial-completed 候选放行（validationQuery 仅 completed 强制；partial 以 queryReady 探针为校验）
+  const rj = candidateOutcome(workDir);
+  if (!rj || !['completed', 'partial-completed'].includes(rj.outcome)) return { ok: false, reason: 'candidate-incomplete' };
+  if (rj && rj.skippedEmpty) return { ok: false, reason: 'skipped-empty-no-activate' };
+  if (rj.outcome === 'completed' && !rj.validationQuery) return { ok: false, reason: 'candidate-incomplete' };
+  const pids = listeningPids(MEM0_PREFLIGHT_PORT);
+  if (pids.length !== 0) return { ok: false, reason: 'preflight-port-busy' };
+  const py = process.env.MEM0_VENV_PY || path.join(MEM0_ROOT, 'venv', 'bin', 'python');
+  const env = { ...process.env, MEM0_SANDBOX_ROOT: workDir, MEM0_SANDBOX_CHROMA: path.join(workDir, 'chroma-data'),
+    MEM0_PROBE_RECORDS: path.join(workDir, 'probe-records.jsonl') }; // fixes: 预检 queryReady 依赖候选 probe
+  const serverEntry = process.env.MEM0_SEARCH_SERVER_BOOTSTRAP || MEM0_SEARCH_SERVER_PY; // 沙盒=run_search_server.py 先注册 fake provider；生产不设=原生 server
+  const child = spawn(py, [serverEntry, '--port', String(MEM0_PREFLIGHT_PORT)], { env, stdio: 'ignore', detached: true });
+  child.unref();
+  // 等 health（≤8s）
+  for (let i = 0; i < 80; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    const pids2 = listeningPids(MEM0_PREFLIGHT_PORT);
+    if (pids2.length === 0) continue;
+    const ok = await mem0HealthOk(MEM0_PREFLIGHT_PORT);
+    if (ok) break;
+  }
+  const hOk = await mem0HealthOk(MEM0_PREFLIGHT_PORT);
+  if (!hOk) { try { process.kill(child.pid, 'SIGKILL'); } catch {} return { ok: false, reason: 'candidate-preflight-health-failed' }; }
+  // validationQuery 检索（仅 completed 强制；partial-completed 以 queryReady 探针为校验）
+  if (rj.outcome === 'completed') {
+    const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 5000);
+    let found = false;
+    try {
+      const resp = await fetch('http://127.0.0.1:' + MEM0_PREFLIGHT_PORT + '/search', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ query: rj.validationQuery, limit: 5 }), signal: ctrl.signal });
+      const d = await resp.json().catch(() => null);
+      found = !!(d && d.ok === true && Array.isArray(d.items) && d.items.length > 0);
+    } catch { found = false; }
+    clearTimeout(t);
+    try { process.kill(child.pid, 'SIGKILL'); } catch {}
+    // 等端口释放
+    for (let i = 0; i < 20; i++) { if (listeningPids(MEM0_PREFLIGHT_PORT).length === 0) break; await new Promise((r) => setTimeout(r, 100)); }
+    return found ? { ok: true } : { ok: false, reason: 'candidate-preflight-query-failed' };
+  }
+  // partial-completed：health/queryReady 已证明候选可检索
+  try { process.kill(child.pid, 'SIGKILL'); } catch {}
+  for (let i = 0; i < 20; i++) { if (listeningPids(MEM0_PREFLIGHT_PORT).length === 0) break; await new Promise((r) => setTimeout(r, 100)); }
+  return { ok: true };
+}
+
+
+async function activateReadyImport(runId) {
+  // 前置：预检通过 → journal → 停 8915 → rename → 起新 → committed
+  const workDir = path.join(MEM0_IMPORTS_ROOT, runId, 'work');  const pre = await preflightCandidate(workDir);
+  if (!pre.ok) return pre;
+  const rj = candidateOutcome(workDir);
+  const journal = { runId, movedOld: [], movedCandidate: [], newServerStarted: false, committed: false };
+  writeActivation(journal);
+  const port = Number(process.env.MEM0_SEARCH_PORT || 8915);
+  // 停受管 8915。fixes F8：8915 已不在听（已死/被清）→ 视为已停止，直接进入 cutover；
+  // 仅当端口有"未受管监听者"（他人进程占 8915）才拒绝，防误杀。
+  const own = await refreshMem0Owner(port);
+  if (own.ok) {
+    if (!stopManagedMem0SearchServer(port)) { fs.rmSync(MEM0_ACTIVATION, { force: true }); return { ok: false, reason: 'activation-stop-failed' }; }
+  } else {
+    if (listeningPids(port).length !== 0) { fs.rmSync(MEM0_ACTIVATION, { force: true }); return { ok: false, reason: 'unmanaged-server' }; }
+    console.error('[mem0-activate] 8915 已不在听，跳过停止（视为已停止，直接 cutover）');
+  }
+  // rename: active/<n> → active/<n>.prev；candidate/<n> → active/<n>（逐文件 journal 追加）
+  const recoveryDir = path.join(workDir, 'recovery');
+  const rollback = async () => {
+    if (journal.newServerStarted) { try { process.kill(readOwner().pid, 'SIGKILL'); } catch {} }
+    fs.mkdirSync(recoveryDir, { recursive: true });
+    // 1) 候选文件从 active 移回 recovery（倒序）；目录整体 rename（非空目录也成功）
+    for (const n of [...journal.movedCandidate].reverse()) {
+      const src = path.join(MEM0_ROOT, n);
+      const dst = path.join(recoveryDir, n);
+      try {
+        if (fs.existsSync(src)) { if (fs.existsSync(dst)) fs.renameSync(dst, dst + '.stale-' + Date.now()); fs.renameSync(src, dst); }
+        for (const st of fs.readdirSync(recoveryDir)) { if (st.includes('.stale-')) try { fs.rmSync(path.join(recoveryDir, st), { recursive: true, force: true }); } catch {} }
+      } catch (e) { console.error('[rollback] candidate %s FAIL: ' + String(e.message || e), n); }
+    }
+    // 2) .prev 移回 active（倒序）；目标残留先移开避免 ENOTEMPTY
+    for (const n of [...journal.movedOld].reverse()) {
+      const pv = path.join(MEM0_ROOT, n + '.prev');
+      const dst = path.join(MEM0_ROOT, n);
+      try {
+        if (fs.existsSync(pv)) { if (fs.existsSync(dst)) fs.renameSync(dst, dst + '.reject-' + Date.now()); fs.renameSync(pv, dst); }
+        for (const rg of fs.readdirSync(MEM0_ROOT)) { if (rg.includes('.reject-')) try { fs.rmSync(path.join(MEM0_ROOT, rg), { recursive: true, force: true }); } catch {} }
+      } catch (e) { console.error('[rollback] old %s FAIL: ' + String(e.message || e), n); }
+    }
+  };
+  try {
+    for (const n of BUNDLE_FILES) {
+      const src = activePath(n);
+      if (fs.existsSync(src)) {
+        const pv = src + '.prev';
+        // fixes F9: 上次激活成功后从不清理 .prev（历史只靠手动），残留 .prev 令 rename 报 ENOTEMPTY
+        // → 旧 .prev 先移开（.prev.stale-<ts>），成功后再统一清扫
+        if (fs.existsSync(pv)) { try { fs.renameSync(pv, pv + '.stale-' + Date.now()); } catch {} }
+        fs.renameSync(src, pv);
+        journal.movedOld.push(n);
+        writeActivation(journal);
+      }
+      const c = candidatePath(workDir, n);
+      if (fs.existsSync(c)) {
+        fs.renameSync(c, src);
+        journal.movedCandidate.push(n);
+        writeActivation(journal);
+      }
+    }
+    // 起新 8915（active 路径）
+    await spawnMem0SearchServerFromActive(port);
+    journal.newServerStarted = true; writeActivation(journal);
+    let hOk = false; for (let i = 0; i < 8; i++) { hOk = await mem0HealthOk(port); if (hOk) break; await new Promise((r) => setTimeout(r, 500)); }
+    if (!hOk) { await rollback(); fs.rmSync(MEM0_ACTIVATION, { force: true }); releaseImportLock(); return { ok: false, reason: 'activation-health-failed' }; }
+    journal.committed = true; writeActivation(journal);
+    fs.rmSync(MEM0_ACTIVATION, { force: true });
+    releaseImportLock();
+    // fixes F11: 激活后 active lastOutcome 与 run.json outcome 对齐（候选 state 不写 lastOutcome，直接换入会残留旧值）
+    try {
+      const as = readMem0State();
+      if (rj && rj.outcome && as.lastOutcome !== rj.outcome) { as.lastOutcome = rj.outcome; writeMem0State(as); }
+    } catch {}
+    // fixes F9: 清扫本轮回滚/切库产生的 .prev.stale-（成功路径留痕清理）
+    try { for (const st of fs.readdirSync(MEM0_ROOT)) { if (st.includes('.prev.stale-')) fs.rmSync(path.join(MEM0_ROOT, st), { recursive: true, force: true }); } } catch {}
+    return { ok: true };
+  } catch (e) {
+    await rollback();
+    fs.rmSync(MEM0_ACTIVATION, { force: true });
+    releaseImportLock();
+    return { ok: false, reason: (e && e.message) || String(e) };
+  }
+}
+
+async function recoverMem0SearchServerOnce(port) {
+  if (mem0RecoveryPromise) return mem0RecoveryPromise;
+  if (Date.now() - lastMem0RecoveryAt < MEM0_RECOVERY_COOLDOWN_MS) return false;
+  lastMem0RecoveryAt = Date.now();
+  mem0RecoveryPromise = (async () => {
+    try {
+      const r = await refreshMem0Owner(port);
+      console.error('[dbg-recover-in] refresh=', JSON.stringify(r));
+      if (!r.ok) return false;
+      const st = stopManagedMem0SearchServer(port);
+      console.error('[dbg-recover-in] stop=', st, 'listening-after=', JSON.stringify(listeningPids(port)));
+      if (!st) return false;
+      // 等端口释放（最多 5s）
+      for (let i = 0; i < 50 && listeningPids(port).length !== 0; i++) await new Promise((q) => setTimeout(q, 100));
+      if (listeningPids(port).length !== 0) return false;
+      await spawnMem0SearchServerFromActive(port);
+      // fixes: 新 server 冷启动需数秒，health 轮询最长 10s
+      for (let i = 0; i < 20; i++) {
+        const ok = await mem0HealthOk(port);
+        if (ok) return true;
+        await new Promise((q) => setTimeout(q, 500));
+      }
+      return false;
+    } catch (e) { console.error('[dbg-recover-in] EXC=', String(e && e.message || e)); return false; }
+    finally { mem0RecoveryPromise = null; }
+  })();
+  return mem0RecoveryPromise;
+}
+
+// mem0 检索结果内容级去重（2026-10-07 方案B）：同文本趋同抽取只保留一条。
+// 归一化 key（去引号/括号内容/折叠空白）→ 处理弯直引号、有无注释括号等近似变体。
+// 适用于 server 与 fallback 两条路径；保留分数最高/首个。
+function normContent(c) {
+  return String(c || '')
+    .replace(/[“”"'«»]/g, '')
+    .replace(/（[^）]*）/g, '')
+    .replace(/\([^)]*\)/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+function dedupMem0Items(items) {
+  if (!Array.isArray(items)) return { items: items || [], deduped: 0 };
+  const seen = new Set();
+  const out = [];
+  let deduped = 0;
+  for (const it of items) {
+    const c = String((it && it.content) || '');
+    if (!c) { continue; }
+    const key = normContent(c);
+    if (seen.has(key)) { deduped += 1; continue; }
+    seen.add(key);
+    out.push(it);
+  }
+  return { items: out, deduped };
+}
+    if (req.method === 'POST' && p === '/api/mem0/activate') {
+      // 候选预检+激活（仅 completed 候选；预检 8916 → 停 8915 → rename → spawn 新 8915）
+      try {
+        const body = await readBody(req);
+        const runId = body.runId;
+        if (!runId) return json(res, 400, { ok: false, reason: 'runId 必填' });
+        if (readActivation()) return json(res, 409, { ok: false, reason: '已有激活进行中' });
+        const r = await activateReadyImport(runId);
+        return json(res, r.ok ? 200 : 500, r);
+      } catch (e) { return json(res, 500, { ok: false, reason: (e && e.message) || String(e) }); }
+    }
+if (req.method === 'POST' && p === '/api/mem0/search') {
+      try {
+        // SC-02: 激活/切换进行中（activation journal 未清除）→ 统一 503 activating，杜绝 rename 窗口 fallback 直读 active
+        if (readActivation()) return json(res, 503, { ...MEM0_ACTIVATING, reason: '激活切换中，请稍后重试' });
+        const body = await readBody(req);
+        const query = String(body.query || '').slice(0, 2048);
+        if (!query) return json(res, 400, { ok: false, reason: 'query 必填' });
+        const limit = Math.max(1, Math.min(20, Number(body.limit) || 5));
+        // 1) 常驻服务优先（2026-10-05：响应带 source="server" 供插件识别常驻路径）
+        const fromServer = await mem0SearchHttp({ query, limit });
+        if (fromServer && fromServer.source === 'activating') return json(res, 503, MEM0_ACTIVATING);
+        if (fromServer && fromServer.source === 'recovering') {
+          const retryAfterMs = Math.min(Math.max(Number(fromServer.retryAfterMs) || MEM0_RECOVERY_MAX_MS, 500), MEM0_RECOVERY_MAX_MS);
+          return json(res, 503, { ...MEM0_RECOVERING, retryAfterMs });
+        }
+        if (fromServer && fromServer.ok === true) {
+          const d = dedupMem0Items(fromServer.items);
+          return json(res, 200, { ...fromServer, items: d.items, deduped: d.deduped, source: 'server' });
+        }
+        const searchPort = Number(process.env.MEM0_SEARCH_PORT || 8915);
+        // fixes F5: 若错误体含 Error finding id → 恢复一次并重试原查询
+        if (fromServer && typeof fromServer.error === 'string' && fromServer.error.includes('Error finding id')) {
+          console.error('[dbg-recover] Error finding id detected, source=', JSON.stringify(fromServer).slice(0,120));
+          const ok = await recoverMem0SearchServerOnce(searchPort);
+          console.error('[dbg-recover] recover result=', ok);
+          if (ok) {
+            // fixes: 恢复后新 server 冷启动（Memory 初始化+chroma 加载）需数秒，
+            // 轮询重试最长 10s（对齐 MEM0_RECOVERY_MAX_MS 恢复预算）
+            const deadline = Date.now() + MEM0_RECOVERY_MAX_MS;
+            while (Date.now() < deadline) {
+              const retry = await mem0SearchHttp({ query, limit });
+              if (retry && retry.ok === true) {
+                const d = dedupMem0Items(retry.items);
+                return json(res, 200, { ...retry, items: d.items, deduped: d.deduped, source: 'server', recovered: true });
+              }
+              await new Promise((r) => setTimeout(r, 500));
+            }
+            return json(res, 503, { ok: false, source: 'recovering', retryAfterMs: 3000, reason: '恢复后重试仍失败' });
+          }
+        }
+        // fixes F7（需求：导入期间 8915 不降级 fallback 慢路）：
+        // 8915 在听但 /search 超时/失败（挂死、或未 queryReady 的 503 无 source）→
+        // ①health 正常先给一次长预算重试（防"慢但健康"被误判）②仍失败→有界恢复一次+重试
+        // ③恢复预算内成功→server；否则→503 recovering（快速失败，绝不走 60-90s 慢路）。
+        // 仅当端口真不在听（8915 彻底消失）才走一次性脚本 fallback（插件据此懒拉起）。
+        const hasListener = listeningPids(searchPort).length > 0;
+        if (hasListener) {
+          const hOk = await mem0HealthOk(searchPort);
+          if (hOk) {
+            const retryLong = await mem0SearchHttp({ query, limit }, 8000);
+            if (retryLong && retryLong.ok === true) {
+              const d = dedupMem0Items(retryLong.items);
+              return json(res, 200, { ...retryLong, items: d.items, deduped: d.deduped, source: 'server' });
+            }
+          }
+          const recovered = await recoverMem0SearchServerOnce(searchPort);
+          if (recovered) {
+            const deadline = Date.now() + MEM0_RECOVERY_MAX_MS;
+            while (Date.now() < deadline) {
+              const retry = await mem0SearchHttp({ query, limit });
+              if (retry && retry.ok === true) {
+                const d = dedupMem0Items(retry.items);
+                return json(res, 200, { ...retry, items: d.items, deduped: d.deduped, source: 'server', recovered: true });
+              }
+              await new Promise((r) => setTimeout(r, 500));
+            }
+          }
+          console.error('[mem0-search] 8915 在听但检索失败 → 503 recovering（不降级慢路）query=' + query.slice(0, 40));
+          return json(res, 503, { ...MEM0_RECOVERING, reason: '8915 在听但检索失败，恢复未就绪（不降级慢路）' });
+        }
+        // 2) fallback：一次性脚本（source="fallback" → 插件据此触发懒拉起常驻服务）
+        //    MEM0_SANDBOX_CHROMA 显式透传：沙盒测试指向重建段；生产缺省= root/chroma-data
+        const spawnEnv = { ...process.env, MEM0_DIR: MEM0_PY_DIR, MEM0_SANDBOX_ROOT: MEM0_ROOT,
+                          MEM0_SANDBOX_CHROMA: process.env.MEM0_SANDBOX_CHROMA || path.join(MEM0_ROOT, 'chroma-data') };
+        ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'no_proxy'].forEach((k) => delete spawnEnv[k]);
+        const r = spawnSync(mem0Py(), [MEM0_SEARCH_PY, '--query', query, '--limit', String(limit)], { encoding: 'utf8', timeout: 60000, env: spawnEnv });
+        if (r.status !== 0) return json(res, 500, { ok: false, reason: String(r.stderr || '').slice(0, 300) || 'mem0 search failed' });
+        const out = r.stdout || '';
+        // 脚本 stdout 可能含 chroma/spaCy/PostHog 警告行 → 只取最后一行 JSON
+        const last = out.trim().split('\n').pop() || '';
+        let data;
+        try { data = JSON.parse(last); } catch { return json(res, 500, { ok: false, reason: 'mem0 search 输出解析失败: ' + last.slice(0, 200) }); }
+        const fd = dedupMem0Items(data.items);
+        return json(res, 200, { ...data, items: fd.items, deduped: fd.deduped, source: 'fallback' });
+      } catch (e) { return json(res, 500, { ok: false, reason: (e && e.message) || String(e) }); }
+    }
+
+    // ── Embedding 预设（镜像 model.presets 增删改，存 config.model.embeddingPresets）──
+    if (req.method === 'GET' && p === '/api/embedding-presets') {
+      return json(res, 200, { ok: true, presets: Array.isArray(config.model?.embeddingPresets) ? config.model.embeddingPresets : [] });
+    }
+    if (req.method === 'POST' && p === '/api/embedding-presets') {
+      const body = await readBody(req);
+      const presets = saveEmbeddingPresets(body.presets);
+      return json(res, 200, { ok: true, presets });
+    }
+
+    // ── Wiki 摄入模型预设（2026-10-20 起并入统一 LLM 总表 model.presets，此端点读写同一总表，前端无需改动）──
+    if (req.method === 'GET' && p === '/api/wiki-model-presets') {
+      return json(res, 200, { ok: true, presets: readModelPresets() });
+    }
+    if (req.method === 'POST' && p === '/api/wiki-model-presets') {
+      const body = await readBody(req);
+      const before = readModelPresets().length;
+      const presets = saveModelPresets(body.presets);
+      // 留痕（对齐原 wiki 摄入预设写操作日志）
+      if (before === 0 && presets.length > 0) log('ok', `统一预设总表已保存 ${presets.length} 条（${presets.map((x) => x.name).join('、')}）`);
+      else if (before > 0 && presets.length === 0) log('info', '统一预设总表已清空');
+      else log('info', `统一预设总表已更新（${before} → ${presets.length} 条）`);
+      return json(res, 200, { ok: true, presets });
+    }
+
+    // ── 阶段1：wiki/codegraph 资产列表（panel team-assets 只读 + 本地 managed 合并）──
+    if (req.method === 'GET' && p === '/api/wiki-assets') return json(res, 200, await listAssets('wiki'));
+    if (req.method === 'GET' && p === '/api/codegraph-assets') return json(res, 200, await listAssets('codegraph'));
+
+    // ── LLM WIKI 板块（独立命名空间 /api/wiki/*，斜杠；与 /api/wiki-assets 连字符端点互不干扰）──
+    if (req.method === 'GET' && p === '/api/wiki/assets') {
+      const items = wikiAssets.listAssetsW().map(a => ({ ...a, isAsset: isAssetSkeleton(a.path) }));
+      return json(res, 200, { ok: true, items, total: items.length });
+    }
+    if (req.method === 'POST' && p === '/api/wiki/assets') {
+      const body = await readBody(req);
+      const target = String(body.path || '').trim();
+      if (!target) return json(res, 400, { ok: false, reason: 'path 必填' });
+      // 拒绝注册内嵌模版自身或子路径（assetize.py 同样拒绝 target==SELF / SELF in parents）
+      const self = path.resolve(ASSET_SELF);
+      if (target === self || target.startsWith(self + path.sep))
+        return json(res, 400, { ok: false, reason: '不能注册内嵌资产模版自身' });
+      if (!fs.existsSync(target)) return json(res, 400, { ok: false, reason: '目录不存在' });
+      if (!fs.statSync(target).isDirectory()) return json(res, 400, { ok: false, reason: '不是目录' });
+      // 同 path 幂等：已注册 → 返回既有资产，不重复资产化
+      const existing = wikiAssets.listAssetsW().find(a => path.resolve(a.path) === path.resolve(target));
+      if (existing) return json(res, 200, { ok: true, asset: existing, created: false, duplicate: true });
+      // 2026-10-30：新建资产必须带 code（工具参数标识），空则不创建 —— 前端弹窗已保证，后端兜底校验
+      if (typeof body.code !== 'string' || !body.code.trim())
+        return json(res, 400, { ok: false, reason: 'code 必填（新增资产不能为空 code）' });
+      const id = 'wiki-' + Date.now().toString(36);
+      const regOpts = { id, name: path.basename(target), path: target, code: body.code, description: body.description };
+      if (!isAssetSkeleton(target)) {
+        // 确认后立即登记 pending，让导入/配置两页同步呈现“新建中”；实际目录移动仍只在队首执行。
+        if (body.confirm !== true) return json(res, 400, { ok: false, reason: '目录非资产，资产化会将其内容移入 raw/，需 confirm:true' });
+        const pending = wikiAssets.registerPendingAsset(regOpts);
+        if (!pending.ok) return json(res, 422, pending);
+        const q = wikiQueue.enqueue({ type: 'assetize', id, path: target, assetizeSelf: ASSET_SELF });
+        if (!q.ok) { wikiAssets.unregisterAsset(id); return json(res, 409, q); }
+        return json(res, 202, { ok: true, queued: true, created: true, asset: pending.asset, position: q.position });
+      }
+      const reg = wikiAssets.registerAsset(regOpts);
+      if (!reg.ok) return json(res, 422, reg);
+      return json(res, 200, { ok: true, asset: reg.asset, created: false });
+    }
+    if (req.method === 'POST' && p === '/api/wiki/assets/toggle') {
+      const body = await readBody(req);
+      const r = wikiAssets.setAssetEnabled(body.id || '', !!body.enabled);   // 写回注册表 JSON
+      return r.ok ? json(res, 200, r) : json(res, 409, r);
+    }
+    if (req.method === 'POST' && p === '/api/wiki/assets/description') {
+      const body = await readBody(req);
+      // 新模型 { code, description }；旧模型 { contains, excludes } 由 updateAssetDescription 迁移。
+      const r = wikiAssets.updateAssetDescription(String(body.id || ''), body);
+      return json(res, r.ok ? 200 : (r.reason === 'not found' ? 404 : 422), r);
+    }
+    if (req.method === 'POST' && p === '/api/wiki/assets/cancel') {
+      const body = await readBody(req);
+      const a = wikiAssets.getAsset(body.id || '');
+      if (!a) return json(res, 404, { ok: false, reason: 'asset 未注册' });
+      if (a.state !== 'pending-assetize') return json(res, 409, { ok: false, reason: '仅等待中的新建任务可取消' });
+      const q = wikiQueue.cancelPendingAssetize(a.id);
+      if (!q.ok) return json(res, 409, q);
+      wikiAssets.unregisterAsset(a.id);
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'DELETE' && p === '/api/wiki/assets') {
+      const body = await readBody(req);
+      const a = wikiAssets.getAsset(body.id || '');
+      // ready 与资产化/首次解析失败态均可注销（失败资产必须能清理）；等待中请用取消；进行中/解析中拒绝
+      const deletableFail = a?.state === 'assetize-failed' || a?.state === 'first-update-failed';
+      if (a?.state && a.state !== 'ready' && !deletableFail)
+        return json(res, 409, { ok: false, reason: a.state === 'pending-assetize' ? '等待中的新建任务请点击「取消」' : '资产化/首次解析进行中，暂不能删除' });
+      const r = wikiAssets.unregisterAsset(body.id);
+      // 2026-10-22：删资产后清其残留运行状态（run-state.lastError 残留会导致
+      // 前端持续显示「上次更新失败」提示条，即使资产已删）
+      if (r.ok) wikiRunner.clearAssetStaleState(body.id);
+      return r.ok ? json(res, 200, r) : json(res, 404, r);
+    }
+    // 系统文件夹选择器（macOS 原生弹窗）——新增Wiki 用系统弹窗选目录，不用自制输入框
+    if (req.method === 'POST' && p === '/api/wiki/pick-folder') {
+      pickFolder();
+      return json(res, 200, { ok: true, pending: true });
+    }
+    if (req.method === 'GET' && p === '/api/wiki/pick-folder/result') {
+      return json(res, 200, { ok: true, done: !!(wikiPick && wikiPick.done), path: wikiPick ? wikiPick.path : null });
+    }
+
+    // ── LLM WIKI 资产配置读写（config.yaml：备份 → 校验 → 原子写盘）──
+    if (req.method === 'GET' && p === '/api/wiki/config') {
+      const a = wikiAssets.getAsset(String(new URL(req.url, 'http://x').searchParams.get('asset') || ''));
+      if (!a) return json(res, 404, { ok: false, reason: 'asset 未注册' });
+      if (a.state && a.state !== 'ready') return json(res, 409, { ok: false, reason: '资产新建中，完成后才可配置' });
+      const cfg = path.join(a.path, 'config.yaml');
+      if (!fs.existsSync(cfg)) return json(res, 404, { ok: false, reason: 'config.yaml 缺失' });
+      const yaml = fs.readFileSync(cfg, 'utf8');
+      const r = spawnSync('python3', ['-c', 'import yaml,sys,json;print(json.dumps(yaml.safe_load(open(sys.argv[1]))))', cfg], { encoding: 'utf8' });
+      return json(res, 200, { ok: true, path: cfg, yaml, parsed: r.status === 0 ? JSON.parse(r.stdout) : null });
+    }
+    if (req.method === 'POST' && p === '/api/wiki/config') {
+      const body = await readBody(req);
+      const a = wikiAssets.getAsset(body.asset || '');
+      if (!a) return json(res, 404, { ok: false, reason: 'asset 未注册' });
+      const cfg = path.join(a.path, 'config.yaml');
+      if (!fs.existsSync(cfg)) return json(res, 404, { ok: false, reason: 'config.yaml 缺失' });
+      // 时序：先写 tmp → 校验通过 → 才备份原文件 → 原子 rename。
+      // 校验失败不产生 .bak-*、不碰原文件（备份只在真正写入前一刻生成）。
+      // 2026-10-20：stage model 可解析自「资产内 model_templates ∪ 统一预设总表」；
+      // 总表有而文件缺的模板 → 自动补入快照（应用新预设 → config.yaml 快照添加）。
+      const tmp = cfg + '.tmp';
+      fs.writeFileSync(tmp, String(body.content || ''));
+      const v = spawnSync('python3', ['-c', `import yaml,sys,json
+d=yaml.safe_load(open(sys.argv[1])) or {}
+m=d.setdefault('model_templates',{})
+master=json.loads(sys.stdin.read())
+stages=d.get('stages',{}) or {}
+mnames=set(m.keys()); mnames_master={p['name']:p for p in master if p and p.get('name')}
+need=[s['model'] for k,s in stages.items() if s and s.get('model') and s['model'] not in m and s['model'] not in mnames_master]
+assert not need, 'stage model 不在 model_templates 也不在统一预设总表: '+','.join(str(x) for x in need)
+added=[]
+for k,s in stages.items():
+    if not s or not s.get('model'): continue
+    nm=s['model']
+    if nm in m or nm not in mnames_master: continue
+    mp=mnames_master[nm]
+    t={'name':mp.get('model') or nm,'base_url':mp.get('baseUrl') or '','api_key':mp.get('apiKey') or ''}
+    for f in ('temperature','enable_thinking','no_proxy','timeout','max_tokens'):
+        if mp.get(f) is not None: t[f]=mp[f]
+    m[nm]=t; added.append(nm)
+if added: open(sys.argv[1],'w').write(yaml.safe_dump(d,allow_unicode=True,sort_keys=False))
+print(json.dumps({'added':added}))`, tmp], { input: JSON.stringify(readModelPresets()), encoding: 'utf8' });
+      if (v.status !== 0) { fs.rmSync(tmp, { force: true }); return json(res, 422, { ok: false, reason: v.stderr.trim().slice(0, 300) }); }
+      let snapshotAdded = [];
+      try { snapshotAdded = JSON.parse((v.stdout || '{}').trim()).added || []; } catch {}
+      const bak = cfg + '.bak-' + new Date().toISOString().replace(/[:.]/g, '-');
+      fs.copyFileSync(cfg, bak);
+      fs.renameSync(tmp, cfg);
+      if (snapshotAdded.length) log('info', `资产 ${a.name || a.id} 快照补模板（自统一总表）：${snapshotAdded.join('、')}`);
+      return json(res, 200, { ok: true, backup: bak, snapshotAdded });
+    }
+
+    // ── 沙盒测试钩子（仅 LLM_PRESETS_TEST_HOOK=1 时挂载；生产不设置该 env → 路由不存在）──
+    // 用途：模拟「8126 统一总表不可读」时刻（总表故障 → 资产快照离线兜底）。
+    if (process.env.LLM_PRESETS_TEST_HOOK === '1' && req.method === 'POST' && p === '/api/sandbox/master-outage') {
+      const b = await readBody(req);
+      llmPresets.setMasterAvailable(!b.enabled);
+      log('info', `[sandbox-hook] 统一预设总表可用性 → ${!b.enabled ? '可用' : '故障注入'}`);
+      return json(res, 200, { ok: true, masterAvailable: !b.enabled });
+    }
+
+    // ── LLM WIKI 更新控制（所有更新统一进持久化单队列）──
+    if (req.method === 'GET' && p === '/api/wiki/queue') {
+      return json(res, 200, { ok: true, ...wikiQueue.getQueueStatus() });
+    }
+    if (req.method === 'POST' && p === '/api/wiki/update') {
+      const body = await readBody(req);
+      const asset = wikiAssets.getAsset(body.asset || '');
+      if (!asset) return json(res, 404, { ok: false, reason: 'asset 未注册' });
+      if (asset.state && asset.state !== 'ready') return json(res, 409, { ok: false, reason: '资产新建中，完成后才可更新' });
+      const r = wikiQueue.enqueue({ type: 'update', id: asset.id });
+      return r.ok ? json(res, 202, r) : json(res, 409, r);
+    }
+    if (req.method === 'POST' && p === '/api/wiki/update/pause') {
+      const r = wikiRunner.pauseUpdate();
+      return r.ok ? json(res, 200, r) : json(res, 400, r);
+    }
+    if (req.method === 'POST' && p === '/api/wiki/update/resume') {
+      const r = wikiRunner.resumeUpdate();
+      return r.ok ? json(res, 200, r) : json(res, 400, r);
+    }
+    if (req.method === 'POST' && p === '/api/wiki/update/stop') {
+      const r = wikiRunner.stopUpdate();
+      return r.ok ? json(res, 200, r) : json(res, 400, r);
+    }
+    if (req.method === 'GET' && p === '/api/wiki/update/progress') {
+      const assetId = new URL(req.url, 'http://x').searchParams.get('asset') || '';
+      return json(res, 200, wikiRunner.getProgress({ id: assetId }));
+    }
+    // LLM WIKI 定时配置（wikiUpdate 子键；读写 + 重挂定时）
+    if (req.method === 'GET' && p === '/api/wiki/update/config') {
+      return json(res, 200, { ok: true, config: { ...DEFAULT_CONFIG.wikiUpdate, ...(config.wikiUpdate || {}) }, nextRunAt: wikiNextRunAt });
+    }
+    if (req.method === 'POST' && p === '/api/wiki/update/config') {
+      const body = await readBody(req);
+      config.wikiUpdate = { ...DEFAULT_CONFIG.wikiUpdate, ...(config.wikiUpdate || {}), ...(body.config || {}) };
+      saveConfig(config);
+      applyWikiScheduler();
+      return json(res, 200, { ok: true, config: config.wikiUpdate, nextRunAt: wikiNextRunAt });
+    }
+
+    // ── 阶段1：wiki 标签映射（pages/label/toggle/validate）──
+    if (req.method === 'GET' && p === '/api/wiki-map/pages') {
+      const wikiId = new URL(req.url, 'http://x').searchParams.get('wiki_id');
+      if (!wikiId) return json(res, 400, { ok: false, reason: 'wiki_id required' });
+      return json(res, 200, await wikiMapPages(wikiId));
+    }
+    if (req.method === 'POST' && p === '/api/wiki-map/label') {
+      const b = await readBody(req);
+      if (b.action === 'add') maps.addLabelRef('wiki', b.label, { wikiId: b.wiki_id, id: b.id, titleAtSave: b.title });
+      else maps.removeLabelRef('wiki', b.label, b.wiki_id, b.id);
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && p === '/api/wiki-map/toggle') {
+      const b = await readBody(req);
+      maps.toggleManaged('wiki', b.wiki_id, !!b.on, b.name); // r4：携带资产名（wiki 无项目名标签语义，name 仅资产显示用）
+      log('ok', `Wiki 资产已${b.on ? '纳入管理' : '取消管理'}：${(b.name || b.wiki_id)}（${b.wiki_id}）`);
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && p === '/api/wiki-map/toggle-label') {
+      // t9d-r3：标签启用/停用（静音命中）持久化
+      const b = await readBody(req);
+      maps.toggleMuted('wiki', b.label, !!b.on);
+      log('ok', `Wiki 标签已${b.on ? '停用' : '启用'}：${b.label}（${b.on ? '不唤醒注入' : '恢复唤醒'}）`);
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && p === '/api/wiki-map/validate') {
+      const b = await readBody(req);
+      return json(res, 200, await wikiMapValidate(b.wiki_id));
+    }
+    if (req.method === 'POST' && p === '/api/wiki-map/fix') {
+      const b = await readBody(req);
+      if (!b.wiki_id) return json(res, 400, { ok: false, reason: 'wiki_id required' });
+      const r = await wikiMapFix(b.wiki_id);
+      if (r.ok) log('ok', `Wiki 映射一键修复：${r.fixed} 处漂移重挂${r.skipped ? `，${r.skipped} 处失效跳过` : ''}`);
+      return json(res, 200, r);
+    }
+    if (req.method === 'POST' && p === '/api/wiki-map/rename') {
+      const b = await readBody(req);
+      const before = (maps.loadMaps('wiki').labels[b.old] || []).length;
+      const merged = !!maps.loadMaps('wiki').labels[b.next] && b.old !== b.next;
+      maps.renameLabel('wiki', b.old, b.next);
+      return json(res, 200, { ok: true, moved: before, merged });
+    }
+    if (req.method === 'POST' && p === '/api/wiki-map/drop-source') {
+      const b = await readBody(req);
+      const d0 = maps.loadMaps('wiki');
+      let removed = 0;
+      for (const lb of Object.keys(d0.labels)) removed += d0.labels[lb].filter((r) => r.wiki_id === b.wiki_id && r.id === b.id).length;
+      maps.dropSource('wiki', b.wiki_id, b.id);
+      return json(res, 200, { ok: true, removed });
+    }
+    if (req.method === 'POST' && p === '/api/wiki-map/seed') {
+      const b = await readBody(req);
+      try {
+        const live = await ksPost('/v3/wiki/page/ls', { wiki_id: b.wiki_id });
+        const cfg = readKsEnv();
+        const r = await seedLabels(cfg, live, { dryRun: b.dryRun !== false, maxPages: Number(b.maxPages || 3), kind: 'wiki', wikiId: b.wiki_id });
+        if (!b.dryRun && r.ok) log('ok', `Wiki 资产「${(maps.loadMaps('wiki').assets[b.wiki_id]?.name || b.wiki_id)}」已使用「从页面标题生成初始标签」批量创建标签 ${r.generated.length} 个`);
+        return json(res, 200, r);
+      } catch (e) {
+        return json(res, 200, { ok: false, reason: String((e && e.message) || e) });
+      }
+    }
+
+    // ── t9d-r3：全量混合标签（wiki+cg，含 muted 状态与 kind 标注；datalist 真源）──
+    if (req.method === 'GET' && p === '/api/kb/labels') {
+      try {
+        const wikiMap = maps.loadMaps('wiki');
+        const cgMap = maps.loadMaps('codegraph');
+        const wmuted = new Set(wikiMap.mutedLabels || []);
+        const cmuted = new Set(cgMap.mutedLabels || []);
+        const labels = [];
+        // r4：CG 资产名 = 项目名默认隐藏标签，排除（wiki 无项目名标签语义）
+        const cgProjectNames = new Set(Object.values(cgMap.assets || {}).map((a) => a && a.name).filter(Boolean));
+        for (const lb of Object.keys(wikiMap.labels || {})) labels.push({ label: lb, kind: 'wiki', muted: wmuted.has(lb) });
+        for (const lb of Object.keys(cgMap.labels || {})) {
+          if (cgProjectNames.has(lb)) continue; // 项目名标签默认隐藏，不进列表
+          labels.push({ label: lb, kind: 'cg', muted: cmuted.has(lb) });
+        }
+        return json(res, 200, { ok: true, labels });
+      } catch (e) {
+        return json(res, 200, { ok: false, reason: String((e && e.message) || e) });
+      }
+    }
+
+    // ── t9d-r2+r4：知识库中转聚合查询（多目的地场景 agent 入口；每资产附 map 扩展字段）
+    // 方案B（2026-09-21 用户拍板）：mapped=标签映射页列表（主，精确）+ spread=FTS 内容扩散（辅）
+    if (req.method === 'POST' && p === '/api/kb/search') {
+      try {
+        const body = await readBody(req);
+        const query = String(body.query || '').trim();
+        if (!query) return json(res, 400, { ok: false, reason: 'query required' });
+        const hop = Number(body.hop ?? 2);
+        const limit = Number(body.limit ?? 5);
+        const results = [];
+        const errors = [];
+        const wikiMap = maps.loadMaps('wiki');
+        const cgMap = maps.loadMaps('codegraph');
+
+        // ── ① mapped：命中标签 → maps.labels 映射页列表（跨资产，精确主通道）──
+        // t9d-r4（2026-09-22 用户拍板）：mapped 只显示【精准匹配】标签的映射页——
+        //   label 必须在 query 中作为完整词出现（前后词边界），子串兄弟标签（如 dsh-agent-teams 标准规划审核表）
+        //   不误入；按 (wiki_id, 页面 id) 去重（同页多标签映射算 1，防重复计数漏网）。
+        const mappedRefs = [];
+        const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const labelHit = (label) => new RegExp(`(^|\\s)${escRe(label)}(\\s|$)`).test(' ' + query + ' ');
+        const seenMapped = new Set();
+        const pushMapped = (kind, label, r, name) => {
+          const key = `${kind}:${r.wiki_id}::${r.id}`;
+          if (seenMapped.has(key)) return; // 去重：同资产同页多标签只列一次
+          seenMapped.add(key);
+          // 2026-09-22：mapped 条目不带 label 字段——页面就是页面，标签只用于唤醒定位/字段搜索，不标注关联
+          mappedRefs.push({ kind, wiki_id: r.wiki_id, name, id: r.id, titleAtSave: r.titleAtSave || r.id });
+        };
+        for (const [label, refs] of Object.entries(wikiMap.labels || {})) {
+          if (labelHit(label)) {
+            for (const r of refs) {
+              const asset = wikiMap.assets && wikiMap.assets[r.wiki_id];
+              if (!asset || !asset.managed) continue; // 未纳管资产映射不展示
+              pushMapped('wiki', label, r, (asset.name || r.wiki_id));
+            }
+          }
+        }
+        for (const [label, refs] of Object.entries(cgMap.labels || {})) {
+          if (labelHit(label)) {
+            for (const r of refs) {
+              const asset = cgMap.assets && cgMap.assets[r.wiki_id];
+              if (!asset || !asset.managed) continue;
+              pushMapped('cg', label, r, (asset.name || r.wiki_id));
+            }
+          }
+        }
+        const mapped = [...mappedRefs].sort((a, b) => a.wiki_id.localeCompare(b.wiki_id) || a.id.localeCompare(b.id));
+
+        // ── ② spread：对 managed 资产 FTS 内容扩散（辅通道，覆盖无标签但内容含词页）──
+        // wiki：遍历 managed 资产
+        const wikiIds = Object.keys(wikiMap.assets || {}).filter((id) => wikiMap.assets[id] && wikiMap.assets[id].managed);
+        for (const wikiId of wikiIds) {
+          try {
+            const r = await fetch(`${KS_URL}/v3/wiki/search`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'x-tdai-service-id': 'default' },
+              body: JSON.stringify({ wiki_id: wikiId, query, hop, limit }),
+            });
+            if (!r.ok) throw new Error(`KS wiki/search HTTP ${r.status}`);
+            const j = await r.json();
+            const hits = ((j.data && j.data.results) || []).map((x) => ({
+              id: String(x.path || '').replace(/^wiki\//, '').replace(/\.md$/, ''), // page/read 的 refs 用页面 id（去 wiki/ 前缀和 .md）
+              path: x.path, title: x.title, snippet: x.snippet, score: x.score, type: x.type, hop: x.hop,
+            }));
+            if (hits.length) {
+              results.push({
+                kind: 'wiki', id: wikiId, name: wikiMap.assets[wikiId].name || wikiId,
+                hits,
+                map: '扩展（host 与 header 固定：curl 的 -H "x-tdai-service-id: default" 必须保留）：\n  1) 查全库关系：curl -X POST "' + KS_URL + '/v3/wiki/graph" -H "x-tdai-service-id: default" -d \'{"wiki_id":"' + wikiId + '"}\'\n  2) 读命中页全文：curl -X POST "' + KS_URL + '/v3/wiki/page/read" -H "x-tdai-service-id: default" -d \'{"wiki_id":"' + wikiId + '","refs":["<用 hits/mapped 里某条的 id 字段>"]}\'',
+              });
+            }
+          } catch (e) { errors.push({ kind: 'wiki', id: wikiId, reason: String((e && e.message) || e) }); }
+        }
+        // cg：遍历 managed 资产（索引 DB 存在才查询，项目不在不注入）
+        const cgIds = Object.keys(cgMap.assets || {}).filter((id) => cgMap.assets[id] && cgMap.assets[id].managed);
+        for (const cgId of cgIds) {
+          try {
+            const r = await fetch(`${KS_URL}/v3/code-graph/search`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'x-tdai-service-id': 'default' },
+              body: JSON.stringify({ code_graph_id: cgId, query, limit }),
+            });
+            if (!r.ok) throw new Error(`KS cg/search HTTP ${r.status}`);
+            const j = await r.json();
+            const text = (j.data && j.data.text) || '';
+            // cg search 返回文本（符号位置），解析节点行
+            const hits = text.split('\n').filter((l) => l.trim() && !l.includes('No results')).slice(0, limit).map((l) => ({ text: l.trim().slice(0, 160) }));
+            if (hits.length) {
+              results.push({
+                kind: 'cg', id: cgId, name: cgMap.assets[cgId].name || cgId,
+                hits,
+                map: '扩展（host 与 header 固定，-H "x-tdai-service-id: default" 必须保留；symbol 用命中符号名）：\n  1) callers 查谁调用：curl -X POST "' + KS_URL + '/v3/code-graph/callers" -H "x-tdai-service-id: default" -d \'{"code_graph_id":"' + cgId + '","symbol":"<符号>"}\'\n  2) callees/impact/node 同 host 换 action 即可',
+              });
+            }
+          } catch (e) { errors.push({ kind: 'cg', id: cgId, reason: String((e && e.message) || e) }); }
+        }
+        return json(res, 200, { ok: true, query, mapped, results, errors });
+      } catch (e) {
+        return json(res, 200, { ok: false, reason: String((e && e.message) || e) });
+      }
+    }
+
+    // ── 阶段1：codegraph 标签映射（与 wiki 同构）──
+    if (req.method === 'GET' && p === '/api/codegraph-map/pages') {
+      const cgId = new URL(req.url, 'http://x').searchParams.get('code_graph_id');
+      if (!cgId) return json(res, 400, { ok: false, reason: 'code_graph_id required' });
+      const local = maps.loadMaps('codegraph');
+      const labelOf = {}; // nodeId -> [labels]
+      for (const [lb, refs] of Object.entries(local.labels)) {
+        for (const r of refs) {
+          if (r.wiki_id !== cgId) continue;
+          (labelOf[r.id] = labelOf[r.id] || []).push(lb);
+        }
+      }
+      // t9b CG-NODES：从 codegraph 真实索引读节点（不再是"仅已登记标签"），合并标签标注
+      const nodes = [];
+      const issues = [];
+      const indexDb = await findCgIndexDb(cgId);
+      if (indexDb) {
+        try {
+          const rows = await queryCgNodes(indexDb);
+          for (const n of rows) {
+            nodes.push({ id: n.id, name: n.name, kind: n.kind, file: n.file_path, labels: labelOf[n.id] || [], ref: 'ok' });
+          }
+        } catch (e) { issues.push({ ref: 'index-error', problem: String((e && e.message) || e) }); }
+      } else {
+        issues.push({ ref: 'no-index', problem: 'codegraph 索引 DB 未找到（本地导入或索引未完成）' });
+      }
+      // 已登记标签但索引缺失的节点（drift/gone 场景）
+      for (const [nodeId, lbs] of Object.entries(labelOf)) {
+        if (!nodes.some((n) => n.id === nodeId)) nodes.push({ id: nodeId, name: nodeId.split(':').pop(), kind: nodeId.split(':')[0] || 'node', labels: lbs, ref: 'gone' });
+      }
+      return json(res, 200, { ok: true, code_graph_id: cgId, nodes, total: nodes.length, issues });
+    }
+    if (req.method === 'POST' && p === '/api/codegraph-map/label') {
+      const b = await readBody(req);
+      if (b.action === 'add') maps.addLabelRef('codegraph', b.label, { wikiId: b.wiki_id, id: b.id, titleAtSave: b.title });
+      else maps.removeLabelRef('codegraph', b.label, b.wiki_id, b.id);
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && p === '/api/codegraph-map/toggle') {
+      const b = await readBody(req);
+      maps.toggleManaged('codegraph', b.wiki_id, !!b.on, b.name); // r4：CG 资产名 → 项目名默认隐藏标签来源
+      log('ok', `CodeGraph 项目已${b.on ? '纳入管理' : '取消管理'}：${(b.name || b.wiki_id)}（${b.wiki_id}）`);
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && p === '/api/codegraph-map/toggle-label') {
+      // t9d-r3：cg 标签启用/停用（静音命中）持久化
+      const b = await readBody(req);
+      maps.toggleMuted('codegraph', b.label, !!b.on);
+      log('ok', `CodeGraph 标签已${b.on ? '停用' : '启用'}：${b.label}（${b.on ? '不唤醒注入' : '恢复唤醒'}）`);
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && p === '/api/codegraph-map/rename') {
+      const b = await readBody(req);
+      const before = (maps.loadMaps('codegraph').labels[b.old] || []).length;
+      const merged = !!maps.loadMaps('codegraph').labels[b.next] && b.old !== b.next;
+      maps.renameLabel('codegraph', b.old, b.next);
+      return json(res, 200, { ok: true, moved: before, merged });
+    }
+    if (req.method === 'POST' && p === '/api/codegraph-map/drop-source') {
+      const b = await readBody(req);
+      const d0 = maps.loadMaps('codegraph');
+      let removed = 0;
+      for (const lb of Object.keys(d0.labels)) removed += d0.labels[lb].filter((r) => r.wiki_id === b.wiki_id && r.id === b.id).length;
+      maps.dropSource('codegraph', b.wiki_id, b.id);
+      return json(res, 200, { ok: true, removed });
+    }
+    if (req.method === 'POST' && p === '/api/codegraph-map/seed') {
+      // t9c：CodeGraph 高频符号 → LLM 粗标种子（与 wiki seed 同构），dryRun=false 落盘 codegraph-map.json
+      const b = await readBody(req);
+      const cgId = b.code_graph_id;
+      if (!cgId) return json(res, 400, { ok: false, reason: 'code_graph_id required' });
+      try {
+        const indexDb = await findCgIndexDb(cgId);
+        if (!indexDb) return json(res, 200, { ok: false, reason: 'codegraph 索引 DB 未找到（先导入）' });
+        const nodes = await queryCgNodes(indexDb);
+        const cfg = readKsEnv();
+        const r = await seedCgLabels(cfg, nodes, { dryRun: b.dryRun !== false, maxNodes: Number(b.maxNodes || 20), cgId });
+        if (!b.dryRun && r.ok) log('ok', `CodeGraph 项目「${(maps.loadMaps('codegraph').assets[cgId]?.name || cgId)}」已使用「从高频符号生成初始标签」批量创建标签 ${r.generated.length} 个`);
+        return json(res, 200, r);
+      } catch (e) {
+        return json(res, 200, { ok: false, reason: String((e && e.message) || e) });
+      }
+    }
+    if (req.method === 'POST' && p === '/api/codegraph/import') {
+      const b = await readBody(req);
+      try {
+        if (b.localPath) {
+          // 本地直索引：写 KS DB。沙盒 run 覆盖 ksDbPath/ksDataRoot/panelUrl/serviceUrl 指向沙盒实体（生产零接触）
+          const sandboxRoot = process.env.SANDBOX_KS_DATA_ROOT;
+          const cfg = { ...CG_DEFAULT, teamId: config.import.teamId, ownerUserId: config.import.userId || config.import.userKey, userId: config.import.userId, agentId: config.import.agentId, panelUrl: process.env.SANDBOX_PANEL_URL || 'http://127.0.0.1:8123', panelUserKey: process.env.SANDBOX_PANEL_KEY || panelUserKey(), serviceUrl: process.env.SANDBOX_KS_URL || 'http://127.0.0.1:8421' };
+          if (sandboxRoot) { cfg.ksDbPath = path.join(sandboxRoot, 'knowledge.db'); cfg.ksDataRoot = sandboxRoot; }
+          const r = await importLocal(cfg, b.localPath, { branch: b.branch, name: b.name });
+          log('ok', `CodeGraph 项目导入（本地直索引）：${b.name || ''} imported=${r.imported}${r.existed ? '（已存在）' : ''} ${r.code_graph_id || ''}`.trim());
+          return json(res, 200, { ok: true, ...r });
+        }
+        if (b.url) {
+          const resolved = await resolveCloneUrl(b.url);
+          // URL 模式走官方 create（worker clone），本 run 仅实现探测；写路径待沙盒验证
+          return json(res, 200, { ok: true, mode: 'probe', probe: resolved, note: 'URL 写路径待沙盒验证（panel create → worker clone → register-meta）' });
+        }
+        return json(res, 400, { ok: false, reason: 'localPath 或 url 必填' });
+      } catch (e) {
+        return json(res, 200, { ok: false, reason: String((e && e.message) || e) });
+      }
+    }
+
+    // ── 阶段1：Wiki 摄入模型（读/写 MemoryKnowledge/.env；t9 A 接通写路径）──
+    if (req.method === 'GET' && p === '/api/wiki-model') {
+      try {
+        const e = readKsEnv();
+        return json(res, 200, { ok: true, model: e.model, baseUrl: e.baseUrl, maxTokens: e.maxTokens, keyMasked: e.key ? e.key.slice(0, 4) + '…' : '' });
+      } catch (e) {
+        return json(res, 200, { ok: false, reason: String((e && e.message) || e) });
+      }
+    }
+    if (req.method === 'POST' && p === '/api/wiki-model') {
+      // t9 A：真实写 MemoryKnowledge/.env（备份→原子改写→校验）。生产写需用户授权（面板 confirm 已确认）
+      try {
+        const body = await readBody(req);
+        const r = saveKsEnv(null, body);
+        if (!r.ok) return json(res, 200, { ok: false, reason: r.reason });
+        log('ok', `Wiki 摄入模型已应用：${body.model || ''} @ ${body.baseUrl || ''}${r.changed?.length ? '（' + r.changed.join('；') + '）' : ''}`);
+        return json(res, 200, { ok: true, changed: r.changed, model: body.model || '', baseUrl: body.baseUrl || '' });
+      } catch (e) {
+        return json(res, 200, { ok: false, reason: String((e && e.message) || e) });
+      }
+    }
+
+    // ── 唤起方式（tdai-memory-inject config.json 直读/直写，与 dsh 插件热读同一份）──
+    if (req.method === 'GET' && p === '/api/evoke') {
+      return json(res, 200, { ok: true, config: readEvokeConfig() });
+    }
+    if (req.method === 'POST' && p === '/api/evoke') {
+      const body = await readBody(req);
+      const r = saveEvokeConfig(body.patch || {});
+      return json(res, r.ok ? 200 : 400, { ok: r.ok, config: r.config, reason: r.reason });
+    }
+    if (req.method === 'POST' && p === '/api/evoke/test') {
+      const body = await readBody(req);
+      const r = await testEvoke(body.text || '');
+      return json(res, 200, r);
+    }
+
+    // ── Harness（统一注入规则 CRUD + 试运行；与插件/唤起测试同源）──
+    if (req.method === 'GET' && p === '/api/harness') {
+      const cfg = pluginReadConfig();
+      return json(res, 200, { ok: true, rules: Array.isArray(cfg.harnessRules) ? cfg.harnessRules : [] });
+    }
+    if (req.method === 'POST' && p === '/api/harness/save') {
+      const body = await readBody(req);
+      if (!body || !body.rule) return json(res, 400, { ok: false, reason: '缺少 rule' });
+      const cfg = pluginReadConfig();
+      const r = harnessSaveRule(cfg, body.rule);
+      if (!r.ok) return json(res, 400, { ok: false, reason: r.reason });
+      const merged = { ...cfg, harnessRules: r.rules };
+      try {
+        fs.writeFileSync(TDAI_PLUGIN_CONFIG, JSON.stringify(merged, null, 2), 'utf8');
+        log('ok', `Harness 规则已保存 → ${TDAI_PLUGIN_CONFIG}`);
+        return json(res, 200, { ok: true, rules: r.rules, rule: r.rule });
+      } catch (e) {
+        log('warn', `Harness 保存失败: ${String(e)}`);
+        return json(res, 500, { ok: false, reason: String(e) });
+      }
+    }
+    if (req.method === 'POST' && p === '/api/harness/delete') {
+      const body = await readBody(req);
+      if (!body || !body.id) return json(res, 400, { ok: false, reason: '缺少 id' });
+      const cfg = pluginReadConfig();
+      const rules = (Array.isArray(cfg.harnessRules) ? cfg.harnessRules : []).filter((r) => r && r.id !== body.id);
+      const merged = { ...cfg, harnessRules: rules };
+      try {
+        fs.writeFileSync(TDAI_PLUGIN_CONFIG, JSON.stringify(merged, null, 2), 'utf8');
+        log('ok', `Harness 规则已删除: ${body.id}`);
+        return json(res, 200, { ok: true, rules });
+      } catch (e) {
+        return json(res, 500, { ok: false, reason: String(e) });
+      }
+    }
+    if (req.method === 'POST' && p === '/api/harness/test') {
+      const body = await readBody(req);
+      const text = String(body?.text || '');
+      const r = await testUnified(text);
+      return json(res, 200, {
+        ok: true,
+        hit: r.hit,
+        harnessHit: r.harnessHit,
+        deepHit: r.deepHit,
+        harnessHits: r.harnessHits,
+        title: r.title,
+        text: r.block,
+        recallErr: r.recallErr,
+      });
+    }
+
+    if (req.method === 'GET' && p === '/health') return json(res, 200, { ok: true, port: PORT });
+    return json(res, 404, { ok: false, reason: 'not found' });
+  } catch (e) {
+    json(res, 500, { ok: false, reason: String(e) });
+  }
+});
+
+async function recoverInterruptedActivation() {
+  // 自包含顶层实现（不依赖 handler 内函数；仅处理 journal 中断恢复）
+  let j = null;
+  try { const raw = fs.readFileSync(MEM0_ACTIVATION, 'utf8'); j = JSON.parse(raw); } catch { j = null; }
+  if (!j) return;
+  log("info", "检测到中断的激活 journal: " + JSON.stringify(j));
+  const sm_port = Number(process.env.MEM0_SEARCH_PORT || 8915);
+  const deg_listening = (port) => {
+    try {
+      const r = spawnSync('lsof', ['-iTCP:'+port,'-sTCP:LISTEN','-n','-P'], { encoding:'utf8' });
+      const pids=[]; for (const line of (r.stdout||'').split('\n').slice(1)) { const m=line.trim().match(/^\S+\s+(\d+)/); if (m) pids.push(Number(m[1])); } return pids;
+    } catch { return []; }
+  };
+  const deg_health = async (port) => {
+    try {
+      const c = new AbortController(); const t = setTimeout(()=>c.abort(),3000);
+      const r = await fetch('http://127.0.0.1:'+port+'/health',{signal:c.signal}); clearTimeout(t);
+      if(!r.ok) return false; const d = await r.json().catch(()=>null);
+      return !!(d && d.ok===true && d.queryReady===true);
+    } catch { return false; }
+  };
+  if (j.committed === true) {
+    const ok = await deg_health(sm_port);
+    log("info", "activation committed=true health=" + ok);
+    if (ok) { fs.rmSync(MEM0_ACTIVATION, { force: true }); try { fs.rmSync(MEM0_IMPORT_LOCK, { force:true }); } catch {} }
+    return;
+  }
+  if (j.movedOld.length === 0 && j.movedCandidate.length === 0) {
+    log("info", "激活未触及 active，清理 journal 保留候选");
+    fs.rmSync(MEM0_ACTIVATION, { force: true });
+    return;
+  }
+  log("info", "执行中断激活回滚 movedOld=" + JSON.stringify(j.movedOld) + " movedCandidate=" + JSON.stringify(j.movedCandidate));
+  const wd = path.join(MEM0_IMPORTS_ROOT, j.runId, 'work');
+  const rc = path.join(wd, 'recovery');
+  fs.mkdirSync(rc, { recursive: true });
+  for (const n of [...j.movedCandidate].reverse()) {
+    const src = path.join(MEM0_ROOT, n);
+    const dst = path.join(rc, n);
+    try {
+      if (fs.existsSync(src)) {
+        // recovery 是候选回收站：目标已存在（上次残留）先移为 .stale，保证 rename 目标不存在
+        if (fs.existsSync(dst)) fs.renameSync(dst, dst + '.stale-' + Date.now());
+        fs.renameSync(src, dst);
+      }
+      // 清理 .stale 残留（防止下一次回滚再撞）
+      for (const st of fs.readdirSync(rc)) { if (st.includes('.stale-')) { try { fs.rmSync(path.join(rc, st), { recursive: true, force: true }); } catch {} } }
+      log("info", "  candidate<-%s ok", n);
+    }
+    catch (e) { log("error", "  candidate %s FAIL: " + String(e.message || e), n); }
+  }
+  for (const n of [...j.movedOld].reverse()) {
+    const pv = path.join(MEM0_ROOT, n + '.prev');
+    const dst = path.join(MEM0_ROOT, n);
+    try {
+      if (fs.existsSync(pv)) {
+        // 若 active/<n> 仍存在（candidate 转移失败残留），先移走避免 ENOTEMPTY
+        if (fs.existsSync(dst)) fs.renameSync(dst, dst + '.reject-' + Date.now());
+        fs.renameSync(pv, dst);
+      }
+      for (const rg of fs.readdirSync(MEM0_ROOT)) { if (rg.includes('.reject-')) { try { fs.rmSync(path.join(MEM0_ROOT, rg), { recursive: true, force: true }); } catch {} } }
+      log("info", "  old<-%s ok", n);
+    }
+    catch (e) { log("error", "  old %s FAIL: " + String(e.message || e), n); }
+  }
+  if (deg_listening(sm_port).length === 0) {
+    try {
+      const py = process.env.MEM0_VENV_PY || path.join(MEM0_ROOT, 'venv', 'bin', 'python');
+      const srv = process.env.MEM0_SEARCH_SERVER_BOOTSTRAP || process.env.MEM0_SEARCH_SERVER_PY || path.join(MEM0_ROOT, 'mem0-search-server.py');
+      const env = { ...process.env, MEM0_SANDBOX_ROOT: MEM0_ROOT, MEM0_SANDBOX_CHROMA: path.join(MEM0_ROOT, 'chroma-data'), MEM0_PROBE_RECORDS: path.join(MEM0_ROOT, 'probe-records.jsonl') };
+      const ch = spawn(py, [srv, '--port', String(sm_port)], { env, stdio: 'ignore', detached: true });
+      ch.unref(); ch.on('error', () => {});
+      try { const cur = JSON.parse(fs.readFileSync(MEM0_OWNER_FILE, 'utf8')); if (cur) { cur.pid = ch.pid; fs.writeFileSync(MEM0_OWNER_FILE, JSON.stringify(cur)); } } catch {}
+    } catch (e) { log("error", "spawn 恢复失败: " + String(e && e.message || e)); }
+  }
+  const ok = await deg_health(sm_port);
+  log("info", "回滚后 18915 health=" + ok);
+  if (ok) { fs.rmSync(MEM0_ACTIVATION, { force: true }); try { fs.rmSync(MEM0_IMPORT_LOCK, { force:true }); } catch {} }
+  else { log("error", "回滚后 health 失败，保留 journal+lock（manual-intervention）"); }
+}
+
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMain) {
+  // 孤儿 runner 检测（生产语义：8126 重启后 state.running=true 但无 runner → interrupted）
+  // fixes F11: 若 runner 已留下终态 run.json（孤儿跑完但父进程 exit 回调丢失）→ 回填 active + 释放锁，不标 interrupted
+  try {
+    const st = readMem0State();
+    if (st.running) {
+      let found = false;
+      try {
+        const r = spawnSync('pgrep', ['-f', MEM0_PROD_RUN], { encoding: 'utf8' });
+        found = r.status === 0 && /^\d+$/m.test((r.stdout || '').trim());
+      } catch { found = false; }
+      if (!found) {
+        let reconciled = false;
+        const lock = readImportLock();
+        if (lock && lock.workDir) {
+          try {
+            const rj = JSON.parse(fs.readFileSync(path.join(lock.workDir, 'run.json'), 'utf8'));
+            if (rj && ['completed', 'partial-completed', 'failed', 'paused', 'stopped'].includes(rj.outcome)) {
+              const s = readMem0State();
+              try {
+                const cand = JSON.parse(fs.readFileSync(path.join(lock.workDir, 'mem0-state.json'), 'utf8'));
+                if (cand && typeof cand.done === 'number') {
+                  s.done = cand.done; s.total = cand.total;
+                  if (typeof cand.failed === 'number') s.failed = cand.failed;
+                  if (cand.cursorTs) s.cursorTs = cand.cursorTs;
+                  if (cand.plannedEndTs) s.plannedEndTs = cand.plannedEndTs;
+                  if (cand.currentId !== undefined) s.currentId = cand.currentId;
+                  if (cand.failedIds) s.failedIds = cand.failedIds;
+                  if (cand.lastOutcome) s.lastOutcome = cand.lastOutcome;
+                  if (cand.runId) s.runId = cand.runId;
+                }
+              } catch {}
+              s.running = false; s.paused = false; s.interrupted = false; s.lastError = '';
+              s.finishedAt = Date.now(); s.lastCode = (rj.lastCode !== undefined ? rj.lastCode : s.lastCode);
+              writeMem0State(s);
+              releaseImportLock();
+              if (['completed', 'partial-completed'].includes(rj.outcome) && !readActivation() && !s.stoppedByUser && !s.paused) {
+                globalThis.__mem0PendingActivateRunId = lock.runId;
+              }
+              reconciled = true;
+              log('info', `孤儿 runner 回填（runId=${lock.runId} outcome=${rj.outcome}）: done=${s.done}/${s.total} failed=${s.failed} 游标=${s.cursorTs}，锁已释放`);
+            }
+          } catch (e) { log('warn', '孤儿 runner 回填尝试失败: ' + String(e && e.message || e)); }
+        }
+        if (!reconciled) {
+          const s = readMem0State();
+          s.running = false; s.paused = false; s.interrupted = true;
+          s.lastError = '已中断（未跑完）：检测到上次写入进程已不存在（服务重启或进程被终止）';
+          writeMem0State(s);
+          log('warn', '孤儿 runner 检测：state.running=true 但无 runner 进程 → 标记 interrupted');
+        }
+      }
+    }
+  } catch (e) { log('warn', '孤儿 runner 检测失败: ' + String(e && e.message || e)); }
+  // 启动恢复（处理中断的激活 journal）
+  recoverInterruptedActivation().then(() => {
+    server.listen(PORT, HOST, () => {
+      log("info", `dsh-console 已启动 http://${HOST}:${PORT}`);
+      applyScheduler();
+      applyMem0Scheduler();
+      migrateLegacyWikiPresets();
+      wikiRunner.recoverOrphanedState();
+      wikiQueue.recoverQueue();
+      wikiQueue.recoverFirstUpdates();
+      applyWikiScheduler();
+    });
+  }).catch((e) => { log("error", "启动恢复失败: " + String(e && e.message || e)); server.listen(PORT, HOST, () => { log("info", `dsh-console 已启动(带恢复失败) http://${HOST}:${PORT}`); applyScheduler(); applyMem0Scheduler(); migrateLegacyWikiPresets(); wikiRunner.recoverOrphanedState(); wikiQueue.recoverQueue(); wikiQueue.recoverFirstUpdates(); applyWikiScheduler(); }); });
+}
+
+process.on('SIGTERM', () => { stopScheduler(); stopMem0Scheduler(); process.exit(0); });
+process.on('SIGINT', () => { stopScheduler(); stopMem0Scheduler(); process.exit(0); });
+
+// ══════════════════ 唤起方式（tdai-memory-inject） ══════════════════
+// 唤起配置单一真源 = 仓库 plugins/tdai-memory-inject/config.json（控制台可写、插件经 symlink 同读一份）
+const TDAI_PLUGIN_CONFIG = path.join(BASE, 'plugins', 'tdai-memory-inject', 'config.json');
+// legacy 回退：dsh profile 旧路径（symlink 迁移前的实体文件位置）
+const TDAI_PLUGIN_CONFIG_LEGACY = path.join(HOME, '.dsh', 'profiles', 'web', 'node_modules', 'tdai-memory-inject', 'config.json');
+
+const EVOKE_DEFAULTS = {
+  enabled: true,
+  modes: { A: true, B: true, C: false },
+  signalWords: ['记忆', '回忆', '之前', '以前', '当时', '上次', '项目进展', '进展如何', '结论', '决策', '怎么做的', '为什么', '记录', '查一下', '回顾', '想想', '历史'],
+  commandWords: ['查记忆', '回忆一下', '查一下记录', '翻一下之前的', '记忆里怎么说的', '搜一下记忆'],
+  thresholdB: 0.55,
+  deepTopK: 6,
+  lightTopK: 2,
+  budgetChars: 1500,
+  l0Mode: 'summary',
+  l0SummaryChars: 400,
+  dedup: true,
+  // ── 阶段5：记忆筛选配置 ──
+  qualityCoef: 0.85,      // 板块一 质量线系数
+  qualityFloor: 0.48,     // 板块一 质量线兜底
+  strongCoef: 0.93,       // 板块一 强相关线系数
+  strongFloor: 0.52,      // 板块一 强相关线兜底
+  topK: 10,               // 候选池
+  l0Coef: 0.93,           // 板块二 L0 相关性系数（独立参数）
+  l0Floor: 0.52,          // 板块二 L0 相关性兜底
+  l0MinHits: 2,           // 板块二 L0 最低命中词数（原文多处命中即相关，长度无关）
+  cmdText: '请执行下面命令，参数已预填：\n[语义检索] mem0 · query="<你的问题>"\n[记忆检索] /v3/atomic/search · query="<你的问题>"\n[原文检索] /v3/conversation/search · query="<你的问题>"',  // 板块三 查询命令文案
+  // ── 阶段5：记忆分配参数 ──
+  p1Base: 900,            // 板块一基线
+  p1Max: 1300,            // 板块一弹性上限
+  p2Max: 400,             // 板块二上限（L0）
+
+  endpoint: 'http://127.0.0.1:8420',
+  serviceId: 'default',
+  apiKey: '',
+  teamId: '',
+  userId: '',
+  agentId: '',
+  timeoutMs: 5000,
+};
+
+function readEvokeConfig() {
+  const candidates = [TDAI_PLUGIN_CONFIG, TDAI_PLUGIN_CONFIG_LEGACY];
+  for (const p of candidates) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+      return { ...EVOKE_DEFAULTS, ...raw, modes: { ...EVOKE_DEFAULTS.modes, ...(raw.modes || {}) } };
+    } catch { /* 尝试下一个 */ }
+  }
+  return { ...EVOKE_DEFAULTS };
+}
+
+function mergeEvokePatch(current, patch) {
+  const merged = { ...current };
+  for (const [k, v] of Object.entries(patch || {})) {
+    if (v === null || v === undefined) continue;
+    if (k === 'modes') merged.modes = { ...merged.modes, ...v };
+    else merged[k] = v;
+  }
+  return merged;
+}
+
+function saveEvokeConfig(patch, filePath = TDAI_PLUGIN_CONFIG) {
+  // 以磁盘现有内容为基准（单一真源，不做 EVOKE_DEFAULTS 注入，避免默认值污染文件）；
+  // 文件不存在（首次写入）时以默认值打底。写失败如实返回 {ok:false, reason}，不再静默假成功。
+  let current;
+  try { current = JSON.parse(fs.readFileSync(filePath, 'utf8')); }
+  catch { current = { ...EVOKE_DEFAULTS }; }
+  const merged = mergeEvokePatch(current, patch);
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), 'utf8');
+    log('ok', `唤起配置已保存 → ${filePath}`);
+    return { ok: true, config: merged };
+  } catch (e) {
+    log('warn', `唤起配置写入失败: ${String(e)}`);
+    return { ok: false, config: merged, reason: String(e) };
+  }
+}
+
+// 阶段5 唤起测试：不再维护 server.js 副本，直接调用 tdai-memory-inject 插件同源链路
+// 唯一实现 = 插件 buildRecall（判定→检索 Mem0/L1/L0→准入→renderBlock）。
+async function testEvoke(text) {
+  return testUnified(String(text || ''));
+}
+
+// 统一试运行：Harness 匹配 + DeepSearch 召回（buildRecall）同源，按冻结协议组装统一胶囊
+async function testUnified(text) {
+  const cfg = pluginReadConfig();
+  const rules = (Array.isArray(cfg.harnessRules) ? cfg.harnessRules : []).filter((r) => r && r.enabled !== false);
+  const hHits = harnessMatch(rules, text);
+  // DeepSearch：仅按原唤起规则命中才检索（Harness 命中不改变唤起判定）
+  let recall = null;
+  let recallErr = null;
+  try {
+    recall = await pluginBuildRecall(cfg, text);
+  } catch (e) {
+    recallErr = String((e && e.message) || e);
+  }
+  const deepHit = !!recall && !!recall.block && recall.block.trim().length > 0;
+  const items = recall ? [
+    ...recall.p1.map((it) => ({ id: it.id, kind: it.kind || 'L1', type: it.type, score: it.score, hitCount: it.hitCount, overlapRatio: it.overlapRatio, content: String(it.content || '') })),
+    ...recall.l0.map((it) => ({ id: it.id, kind: 'L0', role: it.role, score: it.score, content: String(it.content || it.message_text || '') })),
+  ] : [];
+  // DeepSearch 原胶囊内部内容：剥掉旧标签外壳，保留板块文本
+  let deepText = '';
+  if (deepHit) {
+    deepText = String(recall.block).replace(/^[\s\S]*?<tdai_memory_recall[^>]*>/, '').replace(/<\/tdai_memory_recall>[\s\S]*$/, '').trim();
+  }
+  const preview = harnessAssemble(rules, hHits, deepText);
+  return {
+    ok: true,
+    hit: hHits.length > 0 || deepHit,
+    harnessHit: hHits.length > 0,
+    deepHit,
+    mode: recall ? recall.mode : null,
+    signal: recall ? recall.signal : null,
+    command: recall ? recall.command : null,
+    query: recall ? recall.query : null,
+    recallErr,
+    items,
+    l1: recall ? recall.l1 : [],
+    mem0: recall ? recall.mem0 : [],
+    l0: recall ? recall.l0 : [],
+    block: preview.text,
+    title: preview.title,
+    harnessHits: hHits,
+  };
+}
+
+export { parseLogLine, loadLogHistory, mergeEvokePatch, saveEvokeConfig, applyYamlEdit, rewriteModelYaml, saveModelPresets, saveEmbeddingPresets, describeModelChange, collectTimeoutInfo, validateModelBody };

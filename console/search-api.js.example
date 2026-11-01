@@ -1,0 +1,339 @@
+/**
+ * ⑧ 集成：把 deep_search 总表/递进检索/指引/同步/健康 API 挂到沙盒 Console server（6601）。
+ *
+ * 端点（契约见 ①.8）：GET /search · GET /next · GET /status · POST /sync · GET /sync/:jobId。
+ * 唯一写者 V22：Console 进程内唯一；host 只读转发。OV 通道指向沙盒 OV（1934），绝不 1933。
+ */
+import { DatabaseSync } from "node:sqlite";
+import { openDb } from "./store/db.js";
+import { mountedAssets, readAssets } from "./store/wiki-mount.js";
+import { importAllWiki, syncWiki } from "./store/wiki-import.js";
+import { executeSearch } from "./search/engine.js";
+import { nextDecision } from "./guide/next.js";
+import { ovFind, mem0Search } from "./search/remote.js";
+import { scanOvsession, scanWiki } from "./search/local-scan.js";
+import { embedText, quantizeInt8 } from "./search/embed.js";
+import { snapshotHealth, applyStale, wikiHealth } from "./store/health.js";
+import { enqueueSync, getSyncJob, runSyncQueue } from "./store/sync-queue.js";
+import { syncOvsession } from "./store/session-sync.js";
+import { makeSessionReady } from "./store/session-ready.js";
+import { buildSourceCatalog } from "./store/source-catalog.js";
+import { toCarryPayload } from "./guide/carry.js";
+import { readResult } from "./guide/read.js";
+import { buildAnchorCatalog } from "./search/anchor-resolve.js";
+import path from "node:path";
+import { readFileSync } from "node:fs";
+
+let db = null;
+let dbPath = null;
+let wikiAssetsJsonPath = null;
+let ovCfg = { baseUrl: "http://127.0.0.1:1934", apiKey: "" };
+let mem0Cfg = { baseUrl: "http://127.0.0.1:8915" };
+let embedCfg = { baseUrl: "http://<EMBED_HOST>:8810/v1", apiKey: "<API_KEY>", model: "WeMM-Embedding-2B-MLX-4bit", dimensions: 1024 };
+let ovSessionsRoot = null;
+
+export function initSearchApi({ dbPath: dp, wikiAssetsJsonPath: wp, ov, mem0, embed, config }) {
+  dbPath = dp;
+  wikiAssetsJsonPath = wp;
+  db = openDb(dbPath);
+  // ⑧：挂载资产空表则导入 wiki_blocks（幂等；沙盒 test2 真实数据）
+  try {
+    const mounted = mountedAssets(wikiAssetsJsonPath || path.join(path.dirname(dbPath), ".dsh", "wiki-assets.json"));
+    if (mounted.length) importAllWiki(db, mounted);
+  } catch { /* 无挂载资产/路径缺失 → 跳过 */ }
+  ovCfg = ov || ovCfg;
+  mem0Cfg = mem0 || mem0Cfg;
+  embedCfg = embed || embedCfg;
+  if (config?.embedding) {
+    embedCfg = {
+      baseUrl: config.embedding.baseUrl || config.embedding.base_url || embedCfg.baseUrl,
+      apiKey: config.embedding.apiKey || config.embedding.api_key || embedCfg.apiKey,
+      model: config.embedding.model || embedCfg.model,
+      dimensions: config.embedding.dimensions || embedCfg.dimensions,
+    };
+  }
+  ovSessionsRoot = config?.ovSessionsRoot || process.env.OV_SESSIONS_ROOT || path.join(process.env.HOME || "", ".openviking", "data", "viking", "default", "user", "default", "sessions");
+  return { db };
+}
+
+export async function runDeps(query, sessionId) {
+  // 查询向量：一次 embed，多源复用（§ 十二）
+  let qFloat = null;
+  const ensureQ = async () => {
+    if (!qFloat) qFloat = await embedText(embedCfg, query);
+    return qFloat;
+  };
+  return {
+    mem0Search: async (q, opt) => mem0Search(mem0Cfg.baseUrl, { query: q, limit: opt.limit }),
+    ovFind: async (q, opt) => ovFind(ovCfg.baseUrl, ovCfg.apiKey, { query: q, targetUri: undefined, sessionId: opt?.sessionId }),
+    // A5：必须把 opt.sessionIds 转发给 local-scan（carry 按 sessionId 收窄断点；与 scanWiki 转发 assetIds 对称）
+    scanOvsession: async (_q, opt = {}) => { const f = await ensureQ(); return scanOvsession(db, f, { limit: 20, ...(opt.sessionIds?.length ? { sessionIds: opt.sessionIds } : {}) }); },
+    scanWiki: async (_q, opt = {}) => { const f = await ensureQ(); return scanWiki(db, f, { limit: 20, assetIds: opt.assetIds }); },
+    sessionReady: makeSessionReady(ovSessionsRoot),
+  };
+}
+
+import { wikiDirections } from "./guide/wiki-nav.js";
+import { ovDirections, ovDecisionCode, ovJumpPayload } from "./guide/ov-direction.js";
+
+/** 真实导航信号（V13：decisionCode 从结果级信号派生；禁硬编码 available=true） */
+function computeNext(result, req = {}) {
+  const source = result?.source;
+  if (source === "mem0") return { available: false, directions: [], decisionCode: null, payload: null, suggest: "", reason: "no_direction" };
+  if (source === "wiki") {
+    const [, assetId, nodeKey] = String(result.id || "").split(":");
+    const nav = wikiDirections(db, assetId, nodeKey);
+    // payload：目标方向对应的 nav json（/next 带 direction 时回填具体目标，如 up→entity）
+    let payload = null;
+    if (req.direction && nav.nav?.[req.direction]) { try { payload = JSON.parse(nav.nav[req.direction]); } catch { payload = null; } }
+    return { available: nav.directions.length > 0, directions: nav.directions, decisionCode: nav.directions.length ? `wiki:${req.direction || nav.directions[0]}` : null, payload, suggest: "", reason: nav.directions.length ? undefined : "no_direction" };
+  }
+  if (source === "ov_context" || source === "ov_context_find" || source === "ov_context_search") {
+    const directions = ovDirections(result, { visited: req.visited || [] });
+    return { available: directions.length > 0, directions, decisionCode: ovDecisionCode(result, req.direction, { visited: req.visited || [] }), payload: ovJumpPayload(result, req.direction), suggest: "", reason: directions.length ? undefined : "no_direction" };
+  }
+  if (source === "ov_session") {
+    // V38：ov_session 永久 flat，/next 恒 no_direction；只能携带回 S1 重搜。
+    return { available: false, directions: [], decisionCode: "no_direction", payload: null, suggest: "", reason: "no_direction" };
+  }
+  return { available: false, directions: [], decisionCode: null, payload: null, suggest: "", reason: "no_direction" };
+}
+
+/** 引擎结果 → 契约 SearchResult（①.8：score/explain/next/layered/scope/carry；层级源有 next 方向） */
+function toContractResult(r, { explain, req = {} }) {
+  const layered = r.source === "ov_context" || r.source === "wiki";
+  const scope = r.source === "ov_session" ? { sessionId: r.sessionId || r.session_id || r.id } : undefined;
+  return {
+    id: r.id,
+    source: r.source,
+    mode: r.mode,
+    layered,
+    scope,
+    rankable: r.rankable,
+    type: r.type || "",
+    hierarchy: r.hierarchy || "",
+    title: r.title,
+    snippet: r.snippet,
+    score: r.semanticScore || 0,
+    carry: toCarryPayload({ ...r, uri: r.uri || r.id, session_id: r.sessionId || r.session_id, sessionId: r.sessionId || r.session_id }),
+    ...(explain ? { explain: { tier: r.tier, exact: r.exact, hit: r.hit, ov: r.ov, semanticScore: r.semanticScore, rankable: r.rankable } } : {}),
+    next: computeNext({ ...r, uri: r.uri || r.id, session_id: r.sessionId || r.session_id }, req),
+  };
+}
+
+async function handleSearch(req, res, body) {
+  // enabled Wiki 资产（唯一权威源目录）→ 能力选择限定；disabled/non-ready 资产会被 reject。
+  // enabledWikiAssetIds = 内部 assetId（carry 校验用）；enabledWikiAssets = code→assetId（sources wiki:<code> 解析用）。
+  const wp = wikiAssetsJsonPath || path.join(path.dirname(dbPath), ".dsh", "wiki-assets.json");
+  const catalog = buildSourceCatalog(wp);
+  const wikiSources = catalog.sources.filter((s) => s.id.startsWith("wiki:"));
+  const enabledWikiAssetIds = new Set(wikiSources.map((s) => s.assetId));
+  const enabledWikiAssets = Object.fromEntries(wikiSources.map((s) => [s.code, s.assetId]));
+  const deps = await runDeps(body.query, body.sessionId);
+  // 强锚点目录：只读 wiki 结构化元数据（entry/title）+ 技术标识规则。
+  const { page } = await executeSearch({ ...body, enabledWikiAssetIds, enabledWikiAssets, anchorCatalog: buildAnchorCatalog(db) }, deps);
+  const health = snapshotHealth(db, { mem0: true, ovContext: true, ovSession: { synced: true }, wiki: [{ synced: false }] });
+  const contract = { ...page, results: (page.results || []).map((r) => toContractResult(r, { explain: body.explain === true, req: body })) };
+  return json(res, 200, { page: applyStale(contract, health) });
+}
+
+/** A2 修复：/next 从公开 id 契约还原导航对象。
+ * deep_search_next 只要求 id+direction；id 采用 `<source>:<rest>` 编码（与 carry.id 同源）。
+ * source 显式/params 优先；缺失时从 id 前缀还原。ov_context 的 uri = 去掉 `ov_context:` 前缀的
+ * 完整剩余（不按 : split，避免截断 viking://）；wiki 保持完整 id 供 computeNext 解析 assetId/nodeKey。
+ */
+export function buildNextResult(body = {}) {
+  const params = body.params || {};
+  let source = body.source || params.source;
+  let uri = params.uri;
+  const level = params.level;
+  const id = body.id;
+  if (!source && typeof id === "string" && id) {
+    const sep = id.indexOf(":");
+    if (sep > 0) {
+      source = id.slice(0, sep);
+      if (source === "ov_context" && uri === undefined) uri = id.slice(sep + 1);
+    }
+  }
+  return { source, id, level, uri, session_id: params.sessionId || params.session_id, entry: params.entry, board: params.board, title: params.title, ...params };
+}
+
+async function handleNext(req, res, body) {
+  // next 决策：结果级信号派生（V13）；buildNextResult 从 id/params 还原 result（A2 修复）
+  const result = buildNextResult(body);
+  const d = nextDecision(result, body, { wikiNav: (r, req) => computeNext(r, req) });
+  return json(res, 200, { next: d });
+}
+
+function handleStatus(req, res) {
+  // 真实探测（2026-10-30 用户指出硬编码 ok 造假）：mem0/ov_context 真实可达性 + ov_session/wiki 表状态。
+  probeSources().then((health) => {
+    return json(res, 200, { status: { coordinator: "up", sources: [
+      { source: "mem0", status: health.mem0 },
+      { source: "ov_context", status: health.ovContext },
+      { source: "ov_session", status: health.ovSession },
+      { source: "wiki", status: health.wiki.state },
+    ], snapshotAt: Date.now() } });
+  }).catch(() => json(res, 200, { status: { coordinator: "up", sources: [
+    { source: "mem0", status: "unavailable" }, { source: "ov_context", status: "unavailable" },
+    { source: "ov_session", status: "unavailable" }, { source: "wiki", status: "unavailable" },
+  ], snapshotAt: Date.now() } }));
+}
+
+/** 真实探测（只读，绝不写）：mem0 8915 /health · OV 1934 /sessions(带 user key) · ov_session/wiki 表 + 资产。 */
+async function probeSources() {
+  const mem0Ok = await probeMem0();
+  const ovCtxOk = await probeOvc();
+  const ovSessionOk = (() => { try { return db.prepare("SELECT COUNT(*) c FROM ov_chunks").get().c > 0; } catch { return false; } })();
+  const assets = (() => { try { return mountedAssets(wikiAssetsJsonPath || path.join(path.dirname(dbPath), ".dsh", "wiki-assets.json")); } catch { return []; } })();
+  // wiki 真实同步判定：挂载资产中已启用+ready；wiki_blocks>0 → 可搜（ok），有资产但 0 块 → partial，无资产 → down。
+  const mounted = assets.filter((a) => a && a.enabled !== false);
+  let wBlocks = 0;
+  try { wBlocks = db.prepare("SELECT COUNT(*) c FROM wiki_blocks").get().c; } catch {}
+  const wiki = wBlocks > 0
+    ? { state: "ok", note: "all_synced", synced: mounted.length || 1, total: mounted.length || 1 }
+    : (mounted.length ? { state: "partial", note: "partial(0/" + mounted.length + ")", synced: 0, total: mounted.length } : { state: "down", note: "no_assets", synced: 0, total: 0 });
+  return { mem0: mem0Ok ? "ok" : "unavailable", ovContext: ovCtxOk ? "ok" : "unavailable", ovSession: ovSessionOk ? "ok" : "unsynced", wiki };
+}
+
+async function probeMem0() {
+  try {
+    const r = await fetch(mem0Cfg.baseUrl + "/health", { signal: AbortSignal.timeout(2500) }).catch(() => null);
+    if (!r || !r.ok) return false;
+    const j = await r.json().catch(() => null);
+    return !!(j && j.ok && j.queryReady);
+  } catch { return false; }
+}
+async function probeOvc() {
+  try {
+    const r = await fetch(ovCfg.baseUrl + "/api/v1/sessions?limit=1", {
+      headers: ovCfg.apiKey ? { "X-API-Key": ovCfg.apiKey } : {},
+      signal: AbortSignal.timeout(2500),
+    }).catch(() => null);
+    return !!(r && r.ok);
+  } catch { return false; }
+}
+
+/** 只读源统计（2026-10-30 用户：能接真实后端就不标"待后端"）：端口/数据量/上次同步，真实来源。 */
+async function handleSourceStats(req, res) {
+  const stats = await computeSourceStats();
+  return json(res, 200, { version: 1, snapshotAt: Date.now(), sources: stats });
+}
+async function computeSourceStats() {
+  const out = {};
+  // ov_context：端口=ovCfg.baseUrl（沙盒 1934 真实）；会话数=OV /sessions 真实（只读探测）
+  const ovCount = await ovSessionCount();
+  out.ov_context = { port: portOf(ovCfg.baseUrl), count: ovCount, lastSync: null, note: ovCount == null ? "OV 会话数只读探测失败（无聚合端点）" : undefined };
+  // mem0：端口=mem0Cfg.baseUrl（生产 8915 只读）；数据量=mem0-count.json 快照；状态真实
+  const m0 = mem0CountSnapshot();
+  out.mem0 = { port: portOf(mem0Cfg.baseUrl), count: m0.count, lastSync: m0.at, note: "mem0 纯只读接生产 8915" };
+  // ov_session：端口=本地扫描；数据量=db ov_chunks 真实；上次同步=sync_jobs 最近 done
+  let osc = 0, oss = 0;
+  try { osc = db.prepare("SELECT COUNT(*) c FROM ov_chunks").get().c; } catch {}
+  try { oss = db.prepare("SELECT COUNT(DISTINCT session_id) c FROM ov_chunks").get().c; } catch {}
+  out.ov_session = { port: "本地扫描", count: osc, sessions: oss, lastSync: lastSyncOf("session") };
+  // wiki：端口=本地扫描；数据量=db wiki_blocks 真实；资产真实（/api/wiki/assets 已有）
+  let wc = 0;
+  try { wc = db.prepare("SELECT COUNT(*) c FROM wiki_blocks").get().c; } catch {}
+  const allAssets = (() => { try { return readAssets(wikiAssetsJsonPath || path.join(path.dirname(dbPath), ".dsh", "wiki-assets.json")); } catch { return []; } })();
+  out.wiki = { port: "本地扫描", count: wc, lastSync: lastSyncOf("wiki"), assets: allAssets.map(a => ({ id: a.id, name: a.name, state: a.state, enabled: a.enabled, lastUpdate: a.lastUpdate, blocks: blockCountOf(a.id) })) };
+  return out;
+}
+function portOf(baseUrl) { try { return new URL(baseUrl).port || "1934"; } catch { return "1934"; } }
+async function ovSessionCount() {
+  try {
+    const r = await fetch(ovCfg.baseUrl + "/api/v1/sessions?limit=5000", {
+      headers: ovCfg.apiKey ? { "X-API-Key": ovCfg.apiKey } : {},
+      signal: AbortSignal.timeout(5000),
+    }).catch(() => null);
+    if (!r || !r.ok) return null;
+    const j = await r.json().catch(() => null);
+    if (!j || !Array.isArray(j.result)) return null;
+    return j.result.length;
+  } catch { return null; }
+}
+function blockCountOf(assetId) { try { return db.prepare("SELECT COUNT(*) c FROM wiki_blocks WHERE asset_id=?").get(assetId).c; } catch { return null; } }
+function lastSyncOf(target) {
+  try {
+    const r = db.prepare("SELECT finished_at FROM sync_jobs WHERE target LIKE ? AND state='done' ORDER BY finished_at DESC LIMIT 1").get("%" + target + "%");
+    return r && r.finished_at ? new Date(r.finished_at).toISOString() : null;
+  } catch { return null; }
+}
+function mem0CountSnapshot() {
+  try {
+    // mem0-count.json 真实位置：生产 ~/TencentDB-Agent-Memory/.data/mem0/mem0-count.json
+    const candidates = [
+      path.join(process.env.HOME || "", "TencentDB-Agent-Memory", ".data", "mem0", "mem0-count.json"),
+      path.join(path.dirname(dbPath), "mem0-count.json"),
+    ];
+    for (const c of candidates) { try { const j = JSON.parse(readFileSync(c, "utf8")); if (j && j.count != null) return { count: j.count, at: j.at || null }; } catch {} }
+  } catch {}
+  return { count: null, at: null };
+}
+
+/** 只读源目录（V31–V33/V37）：固定源 + 启用/就绪 Wiki 资产；绝不写注册表。 */
+function handleSourceCatalog(req, res) {
+  const wp = wikiAssetsJsonPath || path.join(path.dirname(dbPath), ".dsh", "wiki-assets.json");
+  return json(res, 200, buildSourceCatalog(wp));
+}
+
+function handleSync(req, res, body) {
+  const r = enqueueSync(db, { target: body.target || "all", dryRun: body.dryRun !== false, rebuild: body.rebuild === true });
+  // 触发真实同步 worker（V11：不只入队；跑完即查 GET /sync/:jobId）
+  runSyncQueue(db, { targets: syncTargets() }).catch(() => {});
+  return json(res, 200, r);
+}
+
+/** 同步 runners（V11 删除对账；session 源格式待确认——OV 0.5.2 会话按目录存储无 chunks sqlite） */
+function syncTargets() {
+  return {
+    wiki: async (db, job) => {
+      const mounted = mountedAssets(wikiAssetsJsonPath || path.join(path.dirname(dbPath), ".dsh", "wiki-assets.json"));
+      const res = syncWiki(db, mounted, { force: job.rebuild === 1 });
+      return { source: "wiki", dryRun: job.dry_run === 1, results: res };
+    },
+    session: async (db, job) => {
+      // ⑧ 接 OV session 同步：读 OV ingest 状态库 chunks（readOnly + WAL 安全），镜像到沙盒总表 ov_chunks。
+      // 源库可被 env 覆盖；默认生产 ingest 状态库（用户授权只读）。
+      const src = process.env.OV_SESSION_STATE_DB || path.join(process.env.HOME || "", ".openviking", "data", "vectordb", "ingest", "ov-ingest-state-prod.db");
+      const r = syncOvsession(db, src);
+      return { source: "session", dryRun: job.dry_run === 1, upserted: r.upserted, deleted: r.deleted, total: r.total, cursor: r.cursor };
+    },
+    all: async (db, job) => {
+      const w = await syncTargets().wiki(db, job);
+      const s = await syncTargets().session(db, job);
+      return { wiki: w, session: s };
+    },
+  };
+}
+
+function handleSyncJob(req, res, p) {
+  const id = decodeURIComponent(p.replace("/sync/", ""));
+  const job = getSyncJob(db, id);
+  if (!job) return json(res, 404, { error: { code: "UNKNOWN", message: "job not found", hint: "jobId 不存在" } });
+  let result = null;
+  try { result = job.result_json ? JSON.parse(job.result_json) : null; } catch { result = null; }
+  return json(res, 200, { jobId: job.job_id, state: job.state, result });
+}
+
+function json(res, code, obj) {
+  res.writeHead(code, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(obj));
+}
+
+/** /read：按结果身份（source+id）取回全文（ov_session/wiki 闭环截断；mem0/ov_context 诚实说明）。 */
+function handleRead(req, res, body) {
+  return json(res, 200, { read: readResult(db, body, ovCfg) });
+}
+
+export async function mountSearchRoutes(req, res, p, body) {
+  if ((req.method === "GET" || req.method === "POST") && p === "/search") { await handleSearch(req, res, body); return true; }
+  if ((req.method === "GET" || req.method === "POST") && p === "/next") { await handleNext(req, res, body); return true; }
+  if ((req.method === "GET" || req.method === "POST") && p === "/read") { handleRead(req, res, body); return true; }
+  if (req.method === "GET" && p === "/status") { handleStatus(req, res); return true; }
+  if (req.method === "GET" && p === "/source-catalog") { handleSourceCatalog(req, res); return true; }
+  if (req.method === "GET" && p === "/source-stats") { handleSourceStats(req, res); return true; }
+  if (req.method === "POST" && p === "/sync") { handleSync(req, res, body); return true; }
+  if (req.method === "GET" && p.startsWith("/sync/")) { handleSyncJob(req, res, p); return true; }
+  return false; // 未匹配 → 继续 server.js 原有路由
+}

@@ -1,0 +1,139 @@
+# ============================================================
+# config.example.yaml —— llm-wiki 资产配置（模板）
+#
+# 用法：复制本文件为同目录 config.yaml，把 <…> 占位符替换为
+#       本机实际值后使用。本模板不包含任何本机拓扑（IP/路径）。
+#       （config.yaml 已被 .gitignore 忽略，不入库。）
+#
+# 设计（用户拍板 2026-10-18）：
+#   1. 配置单独存放、可修改；脚本不硬编码，全部自行读取本文件
+#   2. 模型 = 模版 + 环节 两层：
+#        - model_templates: LLM 调用的唯一完整参数来源（name/base_url/api_key/temperature/…）
+#        - stages: 各环节只写用哪个模版；换模型只改 model 名
+#   3. 环节名与调用 LLM 的脚本关联（s1s2 → run_s1s2 等）
+#   4. 流程参数（重试/超时/改名方式等）从脚本硬编码外置到本文件
+# ============================================================
+
+# ---- 模型模版（参数固定，环节引用）----
+model_templates:
+  
+  M2max Qwen3.8-27B-oQ4e-mtp:
+    name: "Qwen3.8-27B-oQ4e-mtp"
+    base_url: "http://<MODEL_HOST_M2>:18088/v1"
+    api_key: "<API_KEY>"
+    temperature: 0.1
+    enable_thinking: false
+    no_proxy: true
+    timeout: 720
+  M4max Qwen3.8-27B-4bit:
+    name: "Qwen3.8-27B-4bit"
+    base_url: "http://<MODEL_HOST_M4>:18088/v1"
+    api_key: "<API_KEY>"
+    temperature: 0.1
+    enable_thinking: false
+    no_proxy: true
+    timeout: 720
+
+# ---- 环节阶段 → 模型（换模型只改 model 名；不在此覆盖模型参数）----
+# 一次 LLM 调用对应一个 stage；同一运行脚本内可串联多个 stage。
+stages:
+  s1:
+    model: M4max Qwen3.8-27B-4bit
+  s2:
+    model: M4max Qwen3.8-27B-4bit
+  s3:
+    model: M4max Qwen3.8-27B-4bit
+    batch_sizes: [5]
+  s4a_multi:
+    model: M4max Qwen3.8-27B-4bit
+  s4a_single:
+    model: M4max Qwen3.8-27B-4bit
+  s4b:
+    model: M4max Qwen3.8-27B-4bit
+  s5_binary:
+    model: M4max Qwen3.8-27B-4bit
+  s5_placement:
+    model: M4max Qwen3.8-27B-4bit
+  s5_merge:
+    model: M4max Qwen3.8-27B-4bit
+  s7_overview1:
+    model: M4max Qwen3.8-27B-4bit
+  s7_overview2:
+    model: M4max Qwen3.8-27B-4bit
+
+# ---- LLM 调用策略（模型模板参数之外的全局重试策略）----
+llm:
+  max_retries: 3          # LLM 调用失败重试次数
+  retry_backoff_base: 2   # 429 指数退避：2^attempt × 此值
+  retry_backoff_max: 30   # 429 退避上限秒
+  # 批次级故障中止（2026-10-18 用户拍板）：
+  #   同一环节连续失败达到阈值 → 单独调用 LLM 探测联通性 →
+  #     探测成功 = 暂态/单条问题：重置计数继续；探测失败 = 服务故障：中止整个批次
+  abort_on_consecutive_failures: 3   # 连续失败阈值 N
+  probe_timeout: 10                  # 联通探测超时秒（短超时，不占队列配额）
+
+# ---- S5 块向量服务（S5 写入后按块生成/更新向量）----
+embedding:
+  name: "WeMM-Embedding-2B-MLX-4bit"
+  preset: "M2max WeMM-Embedding-2B-MLX-4bit"   # 2026-10-20：引用 8126 Embedding 总表预设名（name 恒为实际模型名）
+  base_url: "http://<EMBED_HOST>:8810/v1"
+  api_key: "<API_KEY>"
+  dimensions: 1024
+  timeout: 120
+  no_proxy: true
+  max_retries: 3
+  retry_backoff_base: 2
+  retry_backoff_max: 30
+
+# ---- 环节与写入策略中会影响调用规模/结果的可调参数 ----
+# 其余稳定结构、字段名、模板契约不配置化。
+
+s5:
+  merge_overlap_threshold: 0.60  # 标题核心成分重叠率达到此值时合并，否则追加
+
+# ---- 条目页与源文档冲突改名（S5 查重②）----
+rename:
+  wikipedia_suffix: "（wiki）"   # 条目页避让源文档同名的标记后缀
+  collision_action: "error"      # 加标记后仍冲突 → 报错人工裁决（不自动编号）
+
+# ---- S0 源文档分类分流（2026-10-22 用户拍板；8126「流程配置」板块编辑）----
+# 语义：白名单允许进入——只有 extensions 列出的后缀允许进入对应支线；
+#       未列出的后缀一律分流到 other（不进入任何支线）。
+#       enabled: false = 预留支线（当前仅分流不处理；将来启用并接 pipeline）。
+#       增删改后缀 = 编辑本段（或 8126 流程配置板块保存），无需改脚本。
+classify:
+  text:
+    enabled: true
+    extensions: [md, markdown, txt]
+  image:
+    enabled: false
+    extensions: [png, jpg, jpeg, gif, webp, bmp, svg, ico, heic, tiff]
+  video:
+    enabled: false
+    extensions: [mp4, mov, avi, mkv, webm, flv, wmv, m4v]
+  audio:
+    enabled: false
+    extensions: [mp3, wav, flac, aac, ogg, m4a, wma]
+  office:
+    enabled: false
+    extensions: [doc, docx, xls, xlsx, ppt, pptx, odt, ods, odp]
+  pdf:
+    enabled: false
+    extensions: [pdf]
+  archive:
+    enabled: false
+    extensions: [zip, tar, gz, 7z, rar, bz2]
+
+# ---- 批次/采样默认 ----
+defaults:
+  samples: 1
+
+# ---- S7 概览文档（overview.md）生成参数 ----
+s7:
+  input:
+    strategy: rotation        # 输入策略：rotation=分类轮转（组内按基础信息量降序）
+    pages: 18                 # 分类轮转选页数 N
+    titles_per_page: 8        # 每页小标题上限 M
+    basic_info: true          # A 通道：注入基础信息正文（全文，不截断；页面为空=负样本跳过）
+    titles_info: false        # B 通道：注入小标题列表（≤ titles_per_page）
+    include_ops: true         # 样本带 op 标注（create/update/migrate）+ 解释段

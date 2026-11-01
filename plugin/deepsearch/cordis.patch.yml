@@ -1,0 +1,8 @@
+# deep-search bundle patch — 插件自身条目
+# 由 profile 的 dsh.profile.bundles 加载本包时自动应用（DSH 0.2.0-rc.2 契约）。
+# `- insert:` 把插件 entry 追加进 entry list；name 引用包名，Node 解析找到已安装代码（lib/index.js 的 apply）。
+- insert:
+    - id: deep-search
+      name: 'deep-search'
+      config:
+        enabled: true

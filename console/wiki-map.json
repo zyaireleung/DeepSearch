@@ -1,0 +1,1117 @@
+{
+  "version": 1,
+  "assets": {
+    "wiki-oxfrsbi3": {
+      "managed": false,
+      "seeded": false,
+      "lastValidate": null
+    }
+  },
+  "labels": {
+    "沙盒验证": [
+      {
+        "wiki_id": "wiki-f558y1kk",
+        "id": "concepts/sandbox-verification-rollback-protocol",
+        "titleAtSave": "Sandbox Verification & Rollback Protocol"
+      }
+    ],
+    "429限流": [
+      {
+        "wiki_id": "wiki-f558y1kk",
+        "id": "concepts/429-rate-limiting-defense",
+        "titleAtSave": "429 Rate-Limiting Defense"
+      }
+    ],
+    "2.5D风格": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/2-5d-风格生成",
+        "titleAtSave": "2.5D风格生成"
+      }
+    ],
+    "半写实动漫": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/2-5d-风格生成",
+        "titleAtSave": "2.5D风格生成"
+      }
+    ],
+    "Agentic Coding": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/agentic-coding-capability",
+        "titleAtSave": "Agentic Coding Capability"
+      }
+    ],
+    "智能体编程": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/agentic-coding-capability",
+        "titleAtSave": "Agentic Coding Capability"
+      }
+    ],
+    "AI绘画提示词": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/ai-image-generation-prompt-engineering",
+        "titleAtSave": "AI Image Generation Prompt Engineering"
+      }
+    ],
+    "生图Prompt": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/ai-image-generation-prompt-engineering",
+        "titleAtSave": "AI Image Generation Prompt Engineering"
+      }
+    ],
+    "ARR估值": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/arr-估值逻辑转变",
+        "titleAtSave": "ARR估值逻辑转变"
+      }
+    ],
+    "SaaS估值": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/arr-估值逻辑转变",
+        "titleAtSave": "ARR估值逻辑转变"
+      }
+    ],
+    "批量聚合": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/batch-aggregation",
+        "titleAtSave": "Batch Aggregation"
+      }
+    ],
+    "Batch Aggregation": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/batch-aggregation",
+        "titleAtSave": "Batch Aggregation"
+      }
+    ],
+    "执行模式": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/execution-modes",
+        "titleAtSave": "Execution Modes"
+      }
+    ],
+    "Execution Modes": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/execution-modes",
+        "titleAtSave": "Execution Modes"
+      }
+    ],
+    "Flash模型": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/flash-模型策略",
+        "titleAtSave": "Flash模型策略"
+      }
+    ],
+    "轻量级模型": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/flash-模型策略",
+        "titleAtSave": "Flash模型策略"
+      }
+    ],
+    "全息UI": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/futuristic-holographic-ui-design-style",
+        "titleAtSave": "Futuristic Holographic UI Design Style"
+      }
+    ],
+    "科幻界面": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/futuristic-holographic-ui-design-style",
+        "titleAtSave": "Futuristic Holographic UI Design Style"
+      }
+    ],
+    "高清文字渲染": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/high-fidelity-text-rendering-strategy",
+        "titleAtSave": "High-Fidelity Text Rendering Strategy"
+      }
+    ],
+    "文本生成质量": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/high-fidelity-text-rendering-strategy",
+        "titleAtSave": "High-Fidelity Text Rendering Strategy"
+      }
+    ],
+    "IC-LoRA": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/ic-lora",
+        "titleAtSave": "IC-LoRA"
+      }
+    ],
+    "LTX LoRA": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/ic-lora",
+        "titleAtSave": "IC-LoRA"
+      }
+    ],
+    "导入更新分离": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/import-update-decoupling",
+        "titleAtSave": "Import-Update Decoupling"
+      }
+    ],
+    "异步更新": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/import-update-decoupling",
+        "titleAtSave": "Import-Update Decoupling"
+      }
+    ],
+    "开源许可证": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/license-compliance-in-open-source-llms",
+        "titleAtSave": "License Compliance in Open Source LLMs"
+      }
+    ],
+    "模型商用": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/license-compliance-in-open-source-llms",
+        "titleAtSave": "License Compliance in Open Source LLMs"
+      }
+    ],
+    "LoRA参数": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/lora-参数调优",
+        "titleAtSave": "LoRA参数调优"
+      }
+    ],
+    "生成参数": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/lora-参数调优",
+        "titleAtSave": "LoRA参数调优"
+      }
+    ],
+    "LTX提示词": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/ltx-2-5-提示词结构策略",
+        "titleAtSave": "LTX-2.5 提示词结构策略"
+      }
+    ],
+    "视频生成提示": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/ltx-2-5-提示词结构策略",
+        "titleAtSave": "LTX-2.5 提示词结构策略"
+      }
+    ],
+    "多维标签": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/multi-dimensional-tag-indexing",
+        "titleAtSave": "Multi-Dimensional Tag Indexing"
+      }
+    ],
+    "案例索引": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/multi-dimensional-tag-indexing",
+        "titleAtSave": "Multi-Dimensional Tag Indexing"
+      }
+    ],
+    "多模态编程": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/native-multimodal-coding",
+        "titleAtSave": "Native Multimodal Coding"
+      }
+    ],
+    "截图转代码": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/native-multimodal-coding",
+        "titleAtSave": "Native Multimodal Coding"
+      }
+    ],
+    "Skill分块": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/skill-chunking-strategy",
+        "titleAtSave": "Skill Chunking Strategy"
+      }
+    ],
+    "Token优化": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/skill-chunking-strategy",
+        "titleAtSave": "Skill Chunking Strategy"
+      }
+    ],
+    "文件驱动": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/stateless-file-driven-architecture",
+        "titleAtSave": "Stateless File-Driven Architecture"
+      }
+    ],
+    "无状态架构": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/stateless-file-driven-architecture",
+        "titleAtSave": "Stateless File-Driven Architecture"
+      }
+    ],
+    "并行推理": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/swarm-sampling-mechanism",
+        "titleAtSave": "Swarm Sampling Mechanism"
+      }
+    ],
+    "Swarm采样": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/swarm-sampling-mechanism",
+        "titleAtSave": "Swarm Sampling Mechanism"
+      }
+    ],
+    "SWE-bench": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/swe-bench-verified",
+        "titleAtSave": "SWE-bench Verified"
+      }
+    ],
+    "编程基准": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/swe-bench-verified",
+        "titleAtSave": "SWE-bench Verified"
+      }
+    ],
+    "Token价格": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/token-定价权",
+        "titleAtSave": "Token定价权"
+      }
+    ],
+    "API定价": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/token-定价权",
+        "titleAtSave": "Token定价权"
+      }
+    ],
+    "零信息丢失": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/zero-information-loss-principle",
+        "titleAtSave": "Zero-Information-Loss Principle"
+      }
+    ],
+    "数据保留": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/zero-information-loss-principle",
+        "titleAtSave": "Zero-Information-Loss Principle"
+      }
+    ],
+    "参考图分工": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/参考图分工机制",
+        "titleAtSave": "参考图分工机制"
+      }
+    ],
+    "保留修改分离": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/图像编辑中的保留与修改分离",
+        "titleAtSave": "图像编辑中的保留与修改分离"
+      }
+    ],
+    "局部重绘": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/图像编辑中的保留与修改分离",
+        "titleAtSave": "图像编辑中的保留与修改分离"
+      }
+    ],
+    "模型厂商": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/独立模型厂商生存困境",
+        "titleAtSave": "独立模型厂商生存困境"
+      }
+    ],
+    "价格战": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/独立模型厂商生存困境",
+        "titleAtSave": "独立模型厂商生存困境"
+      }
+    ],
+    "结构化提示词": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/结构化提示词工程",
+        "titleAtSave": "结构化提示词工程"
+      }
+    ],
+    "缓存计费": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/缓存命中定价",
+        "titleAtSave": "缓存命中定价"
+      }
+    ],
+    "API成本": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/缓存命中定价",
+        "titleAtSave": "缓存命中定价"
+      }
+    ],
+    "角色设定": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/角色一致性维护",
+        "titleAtSave": "角色一致性维护"
+      }
+    ],
+    "人设保持": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/角色一致性维护",
+        "titleAtSave": "角色一致性维护"
+      }
+    ],
+    "提示词": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/触发词机制",
+        "titleAtSave": "触发词机制"
+      }
+    ],
+    "激活指令": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/触发词机制",
+        "titleAtSave": "触发词机制"
+      }
+    ],
+    "透明背景": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/透明通道处理",
+        "titleAtSave": "透明通道处理"
+      }
+    ],
+    "PNG抠图": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "concepts/透明通道处理",
+        "titleAtSave": "透明通道处理"
+      }
+    ],
+    "2.5D人像": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/1912-5d-写实人像-lora",
+        "titleAtSave": "1912.5D写实人像-LoRA"
+      }
+    ],
+    "写实LoRA": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/1912-5d-写实人像-lora",
+        "titleAtSave": "1912.5D写实人像-LoRA"
+      }
+    ],
+    "陆小凤": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/ai-陆小凤",
+        "titleAtSave": "AI陆小凤"
+      }
+    ],
+    "模型评测": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/artificial-analysis",
+        "titleAtSave": "Artificial Analysis"
+      }
+    ],
+    "智能指数": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/artificial-analysis",
+        "titleAtSave": "Artificial Analysis"
+      }
+    ],
+    "批次聚合": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/batch-aggregation-tag-indexing-layer",
+        "titleAtSave": "Batch Aggregation & Tag Indexing Layer"
+      }
+    ],
+    "标签索引": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/batch-aggregation-tag-indexing-layer",
+        "titleAtSave": "Batch Aggregation & Tag Indexing Layer"
+      }
+    ],
+    "增量更新": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/chunked-incremental-update-layer",
+        "titleAtSave": "Chunked Incremental Update Layer"
+      }
+    ],
+    "分块重写": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/chunked-incremental-update-layer",
+        "titleAtSave": "Chunked Incremental Update Layer"
+      }
+    ],
+    "Claude模型": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/claude-fable-5",
+        "titleAtSave": "Claude Fable 5"
+      }
+    ],
+    "性能基准": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/claude-fable-5",
+        "titleAtSave": "Claude Fable 5"
+      }
+    ],
+    "定时任务": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/cron-job",
+        "titleAtSave": "Cron Job"
+      },
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "sources/cron-jobs-documentation",
+        "titleAtSave": "Cron Jobs Documentation"
+      }
+    ],
+    "cron": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/cron-job",
+        "titleAtSave": "Cron Job"
+      }
+    ],
+    "调度器": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/cron-scheduler",
+        "titleAtSave": "Cron Scheduler"
+      }
+    ],
+    "cron调度": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/cron-scheduler",
+        "titleAtSave": "Cron Scheduler"
+      }
+    ],
+    "DeepSeek V4": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/deepseek-v4-pro",
+        "titleAtSave": "DeepSeek V4 Pro"
+      }
+    ],
+    "代码重构": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/deepseek-v4-pro",
+        "titleAtSave": "DeepSeek V4 Pro"
+      }
+    ],
+    "DeepSeek": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/deepseek",
+        "titleAtSave": "DeepSeek"
+      }
+    ],
+    "低价API": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/deepseek",
+        "titleAtSave": "DeepSeek"
+      }
+    ],
+    "Draw Things": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/draw-things",
+        "titleAtSave": "Draw Things"
+      }
+    ],
+    "本地生图": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/draw-things",
+        "titleAtSave": "Draw Things"
+      }
+    ],
+    "视频配音": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/dub-it",
+        "titleAtSave": "Dub-It"
+      }
+    ],
+    "Dub-It": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/dub-it",
+        "titleAtSave": "Dub-It"
+      }
+    ],
+    "Flare模式": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/flare",
+        "titleAtSave": "Flare"
+      }
+    ],
+    "快速生图": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/flare",
+        "titleAtSave": "Flare"
+      }
+    ],
+    "水晶Logo": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/glass-prism-spectrum-logo",
+        "titleAtSave": "Glass Prism Spectrum Logo"
+      }
+    ],
+    "3D折射": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/glass-prism-spectrum-logo",
+        "titleAtSave": "Glass Prism Spectrum Logo"
+      }
+    ],
+    "GLM-5.2": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/glm-5-2",
+        "titleAtSave": "GLM-5.2"
+      }
+    ],
+    "智谱旗舰": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/glm-5-2",
+        "titleAtSave": "GLM-5.2"
+      }
+    ],
+    "GLM系列": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/glm-系列",
+        "titleAtSave": "GLM系列"
+      }
+    ],
+    "智谱模型": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/glm-系列",
+        "titleAtSave": "GLM系列"
+      }
+    ],
+    "GPT-5.5": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/gpt-5-5",
+        "titleAtSave": "GPT-5.5"
+      }
+    ],
+    "OpenAI模型": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/gpt-5-5",
+        "titleAtSave": "GPT-5.5"
+      }
+    ],
+    "GPT Image": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/gpt-image-2-5",
+        "titleAtSave": "GPT Image 2.5"
+      },
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "sources/gpt-image-2-5-教程-五大玩法",
+        "titleAtSave": "GPT Image 2.5 教程：五大玩法"
+      }
+    ],
+    "图像生成": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/gpt-image-2-5",
+        "titleAtSave": "GPT Image 2.5"
+      },
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "sources/gpt-image-2-5-教程-五大玩法",
+        "titleAtSave": "GPT Image 2.5 教程：五大玩法"
+      }
+    ],
+    "Heartbeat": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/heartbeat-runner",
+        "titleAtSave": "Heartbeat Runner"
+      }
+    ],
+    "事件处理": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/heartbeat-runner",
+        "titleAtSave": "Heartbeat Runner"
+      }
+    ],
+    "隔离会话": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/isolated-agent-session",
+        "titleAtSave": "Isolated Agent Session"
+      }
+    ],
+    "上下文污染": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/isolated-agent-session",
+        "titleAtSave": "Isolated Agent Session"
+      }
+    ],
+    "Kimi K2.7": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/kimi-k2-7-code",
+        "titleAtSave": "Kimi K2.7 Code"
+      }
+    ],
+    "代码模型": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/kimi-k2-7-code",
+        "titleAtSave": "Kimi K2.7 Code"
+      }
+    ],
+    "批量导入": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/l0-batch-import-layer",
+        "titleAtSave": "L0 Batch Import Layer"
+      }
+    ],
+    "记忆召回": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/l0-batch-import-layer",
+        "titleAtSave": "L0 Batch Import Layer"
+      }
+    ],
+    "LiblibAI": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/liblibai",
+        "titleAtSave": "LiblibAI"
+      }
+    ],
+    "AI平台": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/liblibai",
+        "titleAtSave": "LiblibAI"
+      }
+    ],
+    "LTX-2.5": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/ltx-2-5",
+        "titleAtSave": "LTX-2.5"
+      }
+    ],
+    "视频生成": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/ltx-2-5",
+        "titleAtSave": "LTX-2.5"
+      }
+    ],
+    "主会话": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/main-agent-session",
+        "titleAtSave": "Main Agent Session"
+      }
+    ],
+    "Agent会话": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/main-agent-session",
+        "titleAtSave": "Main Agent Session"
+      }
+    ],
+    "MiniMax M3": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/minimax-m3",
+        "titleAtSave": "MiniMax M3"
+      }
+    ],
+    "多模态模型": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/minimax-m3",
+        "titleAtSave": "MiniMax M3"
+      }
+    ],
+    "MiniMax": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/minimax",
+        "titleAtSave": "MiniMax"
+      }
+    ],
+    "AI大厂": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/minimax",
+        "titleAtSave": "MiniMax"
+      }
+    ],
+    "玻璃拟态": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/neon-glass-panel-social-card",
+        "titleAtSave": "Neon Glass Panel Social Card"
+      }
+    ],
+    "UI模板": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/neon-glass-panel-social-card",
+        "titleAtSave": "Neon Glass Panel Social Card"
+      }
+    ],
+    "图像提示词": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/openai-image-prompting-guide",
+        "titleAtSave": "OpenAI Image Prompting Guide"
+      }
+    ],
+    "OpenAI": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/openai-image-prompting-guide",
+        "titleAtSave": "OpenAI Image Prompting Guide"
+      }
+    ],
+    "OpenAI兼容": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/openai-兼容接口",
+        "titleAtSave": "OpenAI兼容接口"
+      }
+    ],
+    "API迁移": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/openai-兼容接口",
+        "titleAtSave": "OpenAI兼容接口"
+      }
+    ],
+    "OpenClaw": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/openclaw-gateway",
+        "titleAtSave": "OpenClaw Gateway"
+      }
+    ],
+    "网关": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/openclaw-gateway",
+        "titleAtSave": "OpenClaw Gateway"
+      }
+    ],
+    "OpenCode Go": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/opencode-go",
+        "titleAtSave": "OpenCode Go"
+      }
+    ],
+    "模型聚合": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/opencode-go",
+        "titleAtSave": "OpenCode Go"
+      }
+    ],
+    "Skill更新": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/pending-skill-update-marker",
+        "titleAtSave": "Pending Skill Update Marker"
+      }
+    ],
+    "状态标记": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/pending-skill-update-marker",
+        "titleAtSave": "Pending Skill Update Marker"
+      }
+    ],
+    "通义千问": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/qwen-通义千问",
+        "titleAtSave": "Qwen (通义千问)"
+      }
+    ],
+    "Qwen": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/qwen-通义千问",
+        "titleAtSave": "Qwen (通义千问)"
+      }
+    ],
+    "Skill蒸馏": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/skill-distillation-pipeline",
+        "titleAtSave": "Skill Distillation Pipeline"
+      }
+    ],
+    "会话转化": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/skill-distillation-pipeline",
+        "titleAtSave": "Skill Distillation Pipeline"
+      }
+    ],
+    "Skill结构": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/skill-structured-blocks",
+        "titleAtSave": "Skill Structured Blocks"
+      }
+    ],
+    "文档拆分": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/skill-structured-blocks",
+        "titleAtSave": "Skill Structured Blocks"
+      }
+    ],
+    "Stable Diffusion": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/stable-diffusion",
+        "titleAtSave": "Stable Diffusion"
+      }
+    ],
+    "SD": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/stable-diffusion",
+        "titleAtSave": "Stable Diffusion"
+      }
+    ],
+    "Sunburst": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/sunburst",
+        "titleAtSave": "Sunburst"
+      }
+    ],
+    "画质优先": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/sunburst",
+        "titleAtSave": "Sunburst"
+      }
+    ],
+    "TencentDB": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/tencentdb-agent-memory",
+        "titleAtSave": "TencentDB Agent Memory"
+      },
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "sources/tencentdb-agent-memory-skill-批量更新优化方案",
+        "titleAtSave": "TencentDB Agent Memory Skill 批量更新优化方案"
+      }
+    ],
+    "Agent记忆": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/tencentdb-agent-memory",
+        "titleAtSave": "TencentDB Agent Memory"
+      }
+    ],
+    "版本存储": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/version-storage-layer",
+        "titleAtSave": "Version Storage Layer"
+      }
+    ],
+    "快照": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/version-storage-layer",
+        "titleAtSave": "Version Storage Layer"
+      }
+    ],
+    "ZImage": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/zimage",
+        "titleAtSave": "ZImage"
+      }
+    ],
+    "基础模型": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/zimage",
+        "titleAtSave": "ZImage"
+      }
+    ],
+    "智谱": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/智谱-zhipu-ai",
+        "titleAtSave": "智谱 (Zhipu AI)"
+      }
+    ],
+    "杰富瑞": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/杰富瑞-jefferies",
+        "titleAtSave": "杰富瑞 (Jefferies)"
+      }
+    ],
+    "Jefferies": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "entities/杰富瑞-jefferies",
+        "titleAtSave": "杰富瑞 (Jefferies)"
+      }
+    ],
+    "提示词模板": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "other/aigc-04-two-cool-effect-prompt-templates",
+        "titleAtSave": "aigc 04 two cool effect prompt templates"
+      }
+    ],
+    "AIGC": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "other/aigc-04-two-cool-effect-prompt-templates",
+        "titleAtSave": "aigc 04 two cool effect prompt templates"
+      }
+    ],
+    "写实人像": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "sources/1912-5d-写实人像-lora-191-liblibai",
+        "titleAtSave": "1912.5D写实人像-LoRA-191-LiblibAI"
+      }
+    ],
+    "LoRA": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "sources/1912-5d-写实人像-lora-191-liblibai",
+        "titleAtSave": "1912.5D写实人像-LoRA-191-LiblibAI"
+      }
+    ],
+    "国产大模型": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "sources/4-大国产开源模型编程能力横评",
+        "titleAtSave": "4大国产开源模型编程能力横评"
+      }
+    ],
+    "Cron任务": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "sources/cron-jobs-documentation",
+        "titleAtSave": "Cron Jobs Documentation"
+      }
+    ],
+    "视频提示词": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "sources/ltx-2-5-提示词撰写指南",
+        "titleAtSave": "LTX-2.5 提示词撰写指南"
+      }
+    ],
+    "LTX": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "sources/ltx-2-5-提示词撰写指南",
+        "titleAtSave": "LTX-2.5 提示词撰写指南"
+      }
+    ],
+    "批量更新": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "sources/tencentdb-agent-memory-skill-批量更新优化方案",
+        "titleAtSave": "TencentDB Agent Memory Skill 批量更新优化方案"
+      }
+    ],
+    "大模型降价": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "sources/智谱和-minimax-进入-低价增长-时代",
+        "titleAtSave": "智谱和MiniMax，进入“低价增长”时代"
+      }
+    ],
+    "智谱MiniMax": [
+      {
+        "wiki_id": "wiki-oxfrsbi3",
+        "id": "sources/智谱和-minimax-进入-低价增长-时代",
+        "titleAtSave": "智谱和MiniMax，进入“低价增长”时代"
+      }
+    ]
+  }
+}
