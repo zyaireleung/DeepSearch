@@ -1,1 +1,8 @@
-{ "name": "dsh-console", "private": true, "type": "module" }
+{
+  "name": "dsh-console",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:mem0": "node --test test/mem0/*.test.mjs && python3 -m unittest discover -s test/mem0 -p 'test_*.py' -v"
+  }
+}
