@@ -11,11 +11,11 @@
 | 路径 | 作用 |
 |---|---|
 | `raw/` | 源文档（要解析的对象）。文档清单由脚本扫描此目录获得，往里放文件即加文档 |
-| `scripts/` | 运行脚本：`run_fullflow.py`（全流程入口）+ 6 个阶段脚本 + `runtime.py`（共享运行模块） |
+| `scripts/` | 运行脚本：`run_fullflow.py`（全流程入口）+ S0 前置两个（`s0_classify.py` 源文档分类分流 / `s0_unique.py` 源文档去重）+ S1–S7 阶段脚本 + `runtime.py`（共享运行模块） |
 | `assetize.py` | 资产化工具：把任意文档目录原地改造成本资产（见下） |
 | `prompts/` | 各环节 LLM 提示词（可自行维护） |
 | `schema/` | 分类定义（`classification.md`）、12 个分类模板（`templates/`）、错误码表（`error-codes.md`） |
-| `config.yaml` | 唯一配置：模型模板、环节→模型、LLM 重试策略、embedding 服务、流程参数 |
+| `config.yaml` | 唯一配置：模型模板、环节→模型、LLM 重试策略、embedding 服务、流程参数（仓库提交的是 `config.example.yaml` 模板，本机真实 `config.yaml` 不入库） |
 | `entities/` | 产物：条目页（每页 = 一个知识条目，含 frontmatter 与内容块） |
 | `index.md` | 产物：条目索引（按分类分组） |
 | `sources_index.md` | 产物：源文档索引（文档 × 引用次数） |
@@ -49,6 +49,7 @@ python3 assetize.py <PATH_TO_DOC_DIR>
 ```bash
 cd LLM\ WiKi
 
+# S0 前置（可选）：源文档分类分流 / 去重 —— `s0_classify.py` + `s0_unique.py`（配置驱动，见 config.yaml classify 段）
 # 全流程（S1 候选提取 → S2 收敛 → S3 分类 → S4 内容提取 → S5 建页+向量 → S6 索引/日志/游标 → S7 概览）
 # 默认增量：只解析 cursor.json 尚未解析的新增文档；无新增则跳过
 python3 scripts/run_fullflow.py
