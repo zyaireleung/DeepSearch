@@ -12,13 +12,13 @@ deep_search.param.method: 可选字符串，默认 fuzzy_full；fuzzy_mem0_find=
 deep_search.param.carry: 可选 CarryPayload 数组，形如 [结果中的 carry]；每项必须是上一轮返回的原对象（含 source/id/kind 等），不可自造。带 sources 时按 sources 检索，carry 不限制来源；不带 sources 时按 carry 来源收窄。单条结果的 carry 对象需包进数组，不能直接传对象。
 deep_search.param.visited: 可选字符串数组，取自上轮 page.visited；列入其中的能力本轮会被跳过。只有确实要防止重扫时才回传；换 query 重查同源时不要盲目沿用。
 deep_search.param.explain: 可选布尔值，默认 false；true 在结果中附带分项解释，不改变排序。
-deep_search.param.anchors: 可选对象锚点候选数组；只传用户明确给出或真实结果已确认的名称、工件或技术标识，不传方案、流程、现状等问题方面。每项 {text, required}：required=true 表示直接回答必须覆盖该对象，false 表示仅缩小范围的技术限定。Console 仅将可唯一解析的候选作为强锚点，歧义或未解析候选自动降级，不影响 query 的正常检索；不传保持旧排序，传入时必须至少一项且每项 text 非空、required 为布尔值。
+deep_search.param.anchors: 可选对象锚点候选数组；只传用户明确给出或真实结果已确认、且能唯一指对象的技术标识或明确名称，不传方案、流程、现状、普通专名/泛词等问题方面。每项 {text, required}：required=true 表示直接回答必须覆盖该对象，false 表示仅缩小范围的技术限定。传入时必须至少一项且每项 text 非空、required 为布尔值；不传保持旧排序。
 deep_search.out.page: 返回页对象：level、method、isFullSource、complete、verdict、visited、sources、results；需要续查时使用其中真实返回的标识，不自行生成。routing 为按本轮实际命中来源类别（mem0/ov_context/ov_session/wiki）从 source-routing.md 裁剪的来源路线指引，含恒有的【修改 query 方法】与【扩大/更换范围检索方法】，供下一步决策；具体 Wiki 资产及适用内容看当前源目录（source-catalog），不硬编码资产名。
 deep_search.out.verdict: narrowed=达到收窄判据；miss=本轮未达到收窄判据（不等于零结果）；invalid_request=请求参数无效，查看 error。
 deep_search.out.complete: 本轮执行完成标记；unavailable 也可能使其为 true，是否真正查到某源须看 sources[].status，不能只看 complete。
 deep_search.out.sources: 每源执行记录，含 id/mode/status/count；status 可为 searched、skipped、unavailable、timed_out、degraded、disabled，异常时查看 note/error/hint。skipped 可能由 visited 造成，不等于已在本轮检索。
 deep_search.out.results: 混排结果数组；每项含 id/source/title/snippet/score，可有 carry、explain 和 next。carry 是单个对象；next.available=true 时仅用该结果 next.directions 中的方向及其 id 调 deep_search_next。
-deep_search.out.anchorResolution: explain=true 且传 anchors 时返回 query 级锚点解析结果；每项 {text, required, status, canonical?, catalogId?}，status 为 resolved（唯一 wiki 绑定）/ technical（技术标识）/ ambiguous（多记录）/ unresolved（未解析）。只有 resolved/technical 参与强锚点排序；ambiguous/unresolved 仍保留普通 query 相关性匹配。
+deep_search.out.anchorResolution: explain=true 且传 anchors 时返回 query 级锚点解析结果；每项 {text, required, status}，status 为 resolved/technical/ambiguous/unresolved。若某词显示 unresolved 或 ambiguous，换一个更能唯一指对象的技术标识或明确名称重传。
 
 # --- deep_search_next ---
 deep_search_next.description: 根据 deep_search 某条结果的 id 与可用方向，查询该结果的关系导航。必填 id 和 direction；返回 next（可用方向、导航载荷或不可用原因），不是新的 deep_search 结果页。

@@ -1,6 +1,6 @@
 {
   "name": "deep-search",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "type": "module",
   "description": "deep_search 插件 host：注册 deep_search/deep_search_next/deep_search_read/deep_search_status/deep_search_sync 五工具 + 检索导引注入 + 侧边栏只读卡片（适配层，转发 DeepSearch Console :6600，绝不写总表）",
