@@ -198,14 +198,35 @@ class ImporterPlanningTests(unittest.TestCase):
         flat = [m["id"] for g in groups for m in g]
         self.assertEqual(flat, [f"m{i}" for i in range(20)])
 
-    def test_segment_messages_single_oversized_becomes_own_group(self):
-        """单条超预算消息不拆分：独立成组（可超预算），绝不截断。"""
+    def test_segment_messages_single_oversized_split_into_budget_chunks(self):
+        """单条超预算消息按 char_budget 切成多块（2026-11-03 事故修复）：
+        根因=旧逻辑"单条超预算独立成组且不截断"，把 9.4 万字符单条整条发给 8810，
+        触发单次超长前向 → 超 3GB → 8810 崩 → 24 批连锁 502。
+        新契约：单条超预算 → 按预算切多块（切片共享原 message.id，可归因），
+        每块 serialized ≤ 预算；不丢字符（拼接还原=原文）。"""
         importer = load_importer()
         messages = [{"id": "big", "role": "user", "content": "x" * 500}]
         groups = importer._segment_messages(messages, char_budget=60)
-        self.assertEqual(len(groups), 1)
-        self.assertEqual(groups[0][0]["content"], "x" * 500)  # 整条保留
-        self.assertEqual(len(importer._serialize_messages(groups[0])), 500 + len("user: \n"))
+        self.assertGreater(len(groups), 1, "超预算单条应切成多块")
+        for group in groups:
+            self.assertLessEqual(len(importer._serialize_messages(group)), 60,
+                                 f"切片超预算: {len(importer._serialize_messages(group))}")
+            for m in group:
+                self.assertEqual(m["id"], "big")
+        joined = "".join(m["content"] for g in groups for m in g)
+        self.assertEqual(joined, "x" * 500, "切片拼接应还原原文（不丢字符）")
+
+    def test_segment_messages_single_oversized_split_prefers_punctuation(self):
+        """切片尽量在标点/空白断开，不在词中间硬切（可切时）。"""
+        importer = load_importer()
+        content = ("句子。" * 40)
+        messages = [{"id": "p", "role": "user", "content": content}]
+        groups = importer._segment_messages(messages, char_budget=30)
+        self.assertGreater(len(groups), 1)
+        for group in groups:
+            self.assertLessEqual(len(importer._serialize_messages(group)), 30 + len("user: \n"))
+        joined = "".join(m["content"] for g in groups for m in g)
+        self.assertEqual(joined, content, "拼接还原原文")
 
     def test_segment_messages_empty(self):
         importer = load_importer()

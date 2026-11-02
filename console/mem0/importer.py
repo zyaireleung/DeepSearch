@@ -94,12 +94,54 @@ def _serialize_messages(messages: list[dict]) -> str:
     return "".join(f"{(m.get('role') or 'user')}: {m.get('content') or ''}\n" for m in messages)
 
 
-def _segment_messages(messages: list[dict], char_budget: int) -> list[list[dict]]:
-    """检索 embedding 按【整条消息】贪心分段：每子组 serialized 长度 ≤ char_budget。
+def _split_long_message(message: dict, char_budget: int) -> list[dict]:
+    """把一条超预算消息按 char_budget 切成多片（2026-11-03 事故修复）。
 
-    铁律：单条消息绝不被拆分/截断。累加直到超预算切组；单条超预算单独成组（可超预算，
-    但不切断）。与 build_plan 同口径（整条为最小单元），保证发往 8810 的每个 input[i]
-    都在消息边界上，不会把一条消息拆散。
+    事故根因：旧逻辑"单条超预算独立成组且不截断"，把 9.4 万字符单条整条发给 8810
+    → 单次超长前向 → 超 3GB（MLX_MEM_LIMIT）→ 8810 崩 → 24 批连锁 502。
+    修复：超预算单条按预算切片，每片 serialized ≤ char_budget。
+
+    - 切片保留原 message.id（可归因回源消息）与 role；content 为该片文本。
+    - 尽量在标点/空白断开（回看窗口 = 预算一半），无断点则硬切（保证不超预算）。
+    - 不丢字符：各片 content 顺序拼接 == 原文。
+    """
+    role = message.get("role") or "user"
+    text = message.get("content") or ""
+    if not text:
+        return [message]
+    prefix = f"{role}: "
+    # 预留 prefix + 尾部换行的空间，保证每片 serialized 严格 ≤ char_budget
+    body_budget = char_budget - len(prefix) - 1
+    if body_budget <= 0:
+        body_budget = max(1, char_budget - 1)
+    slices, content_slices = [], []
+    i = 0
+    n = len(text)
+    while i < n:
+        end = min(i + body_budget, n)
+        piece = text[i:end]
+        if end < n:
+            # 非末片：在预算后段找标点/空白断点，避免词中间硬切
+            cut = -1
+            for sep in ("\n", "。", "！", "？", "；", ".", "!", "?", ";", " "):
+                pos = piece.rfind(sep)
+                if pos > body_budget // 2 and pos > cut:
+                    cut = pos
+            if cut > 0:
+                piece = piece[: cut + 1]
+        content_slices.append(piece)
+        i += len(piece)
+    for piece in content_slices:
+        slices.append({"id": message.get("id"), "role": role, "content": piece})
+    return slices or [message]
+
+
+def _segment_messages(messages: list[dict], char_budget: int) -> list[list[dict]]:
+    """检索 embedding 按【消息级贪心 + 超预算单条切片】分段：每子组 serialized ≤ char_budget。
+
+    多条消息之间：整条为最小单元，累加直到超预算切组（绝不在消息边界内拆散）。
+    单条消息超预算：按 char_budget 切成多片（不再整条发 8810，防超长前向爆内存）。
+    每个子组 serialized 严格 ≤ char_budget（修复前"单条可超预算"的例外已移除）。
     """
     if char_budget <= 0:
         return [messages] if messages else []
@@ -109,11 +151,16 @@ def _segment_messages(messages: list[dict], char_budget: int) -> list[list[dict]
         if current and cur_len + message_len > char_budget:
             groups.append(current)
             current, cur_len = [], 0
+        if message_len > char_budget:
+            # 单条超预算：切成多片，每片独立成组（不再整条放行）
+            if current:
+                groups.append(current)
+                current, cur_len = [], 0
+            for piece in _split_long_message(message, char_budget):
+                groups.append([piece])
+            continue
         current.append(message)
         cur_len += message_len
-        if message_len > char_budget:
-            groups.append(current)
-            current, cur_len = [], 0
     if current:
         groups.append(current)
     return groups
