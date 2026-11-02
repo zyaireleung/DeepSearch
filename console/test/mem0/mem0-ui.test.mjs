@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveMem0View } from '../../web/mem0-ui.js';
+import { deriveMem0View, deriveMem0RunDisabled } from '../../web/mem0-ui.js';
 
 test('view uses batch progress and message-level cursor (OV 一致)', () => {
   const view = deriveMem0View({
@@ -54,4 +54,27 @@ test('no resolved/total → cursor placeholder', () => {
   assert.equal(view.cursor, '—');
   assert.equal(view.resolved, 0);
   assert.equal(view.total, 0);
+});
+
+test('planned uses plannedTotal (批数), not a message-count total fallback (问题1)', () => {
+  // server.js 旧写 total=totalRows(消息条数200)；UI 若 planned=total 会把 200 当批数显示。
+  // 语义：planned 应只取 plannedTotal（importer 计划出的批数）；无 plannedTotal 时显示 0，不取 total。
+  const view = deriveMem0View({ running: true, plannedTotal: 0, done: 0, failed: 0, total: 200 });
+  assert.equal(view.counts.planned, 0, '无 plannedTotal 时不应把 total(消息条数) 当批数');
+  const view2 = deriveMem0View({ running: true, plannedTotal: 7, done: 1, failed: 0, total: 200 });
+  assert.equal(view2.counts.planned, 7, 'planned 应取 plannedTotal=批数');
+});
+
+test('running card without plannedTotal yet → planned=0（不显示消息条数为批数）', () => {
+  const view = deriveMem0View({ running: true, plannedTotal: 0, done: 0, failed: 0, total: 0 });
+  assert.equal(view.counts.planned, 0);
+});
+
+test('run button disabled only while actually running（OV 一致：paused 不禁用，修复生产死锁）', () => {
+  // 生产死锁回归：遗留 paused(plannedTotal=0) run 的进度卡被隐藏后，仍因 paused 禁用「立即导入」
+  // → 无法开始新导入。OV: btnOvRun.disabled = running（paused 不禁用）。Mem0 应对齐。
+  assert.equal(deriveMem0RunDisabled({ running: true, paused: false }), true);
+  assert.equal(deriveMem0RunDisabled({ running: true, paused: true }), true);
+  assert.equal(deriveMem0RunDisabled({ running: false, paused: true }), false, 'paused 但未运行 → 不禁用（可开始新导入）');
+  assert.equal(deriveMem0RunDisabled({ running: false, paused: false }), false);
 });

@@ -3548,9 +3548,9 @@ async function m0Run() {
     loadM0Status();
   } catch (e) { toast('启动失败: ' + e.message); }
 }
-async function m0Pause() { try { const r = await api('/api/mem0/pause', { method: 'POST', body: '{}' }); toast(r.ok ? '已发送暂停（当前批完成后停止，游标保留）' : '暂停失败: ' + (r.reason || '')); loadM0Status(); } catch (e) { toast(e.message); } }
+async function m0Pause() { try { const r = await api('/api/mem0/pause', { method: 'POST', body: JSON.stringify({ runId: m0LastRunId }) }); toast(r.ok ? '已暂停（已完成记忆总量已同步，可继续）' : '暂停失败: ' + (r.reason || '')); loadM0Status(); } catch (e) { toast(e.message); } }
 async function m0Resume() { try { const r = await api('/api/mem0/resume', { method: 'POST', body: JSON.stringify({ runId: m0LastRunId }) }); toast(r.ok ? '已继续（从已处理处续跑）' : '继续失败: ' + (r.reason || '')); loadM0Status(); } catch (e) { toast(e.message); } }
-async function m0Stop() { try { const r = await api('/api/mem0/stop', { method: 'POST', body: '{}' }); toast(r.ok ? '已停止（游标=当前处理位置）' : '停止失败: ' + (r.reason || '')); loadM0Status(); } catch (e) { toast(e.message); } }
+async function m0Stop() { try { const r = await api('/api/mem0/stop', { method: 'POST', body: JSON.stringify({ runId: m0LastRunId }) }); toast(r.ok ? '已停止（已完成记忆总量已同步，队列已取消）' : '停止失败: ' + (r.reason || '')); loadM0Status(); } catch (e) { toast(e.message); } }
 loadM0Status();
 setInterval(loadM0Status, 10000);
 

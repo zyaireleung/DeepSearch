@@ -87,3 +87,42 @@ test('importer --dry-run 接受 server.js spawn args（契约端到端，--limit
   assert.equal(out.dryRun, true);
   assert.ok(out.plannedTotal >= 0);
 });
+
+
+// 2026-11-02 用户定：暂停/停止要【直接】生效（像旧 mem0），且：
+//  ① pause/stop 都向子进程发 SIGTERM（停止现在已发；暂停需补发）；② pause/stop 的 runId 需有
+//  readMem0State().runId 兜底（锁已释放时仍能找到 runId → 不再 400 "runId 必填"）；
+//  ③ resume 拒绝 stoppedByUser（停止取消队列不可继续）；④ 前端 pause/stop 请求体带 runId。
+test('server.js pause 端点应向子进程发送 SIGTERM（直接暂停，非批边界软停）', () => {
+  const start = serverJs.indexOf("p === '/api/mem0/pause'");
+  const end = serverJs.indexOf("p === '/api/mem0/stop'", start);
+  const block = serverJs.slice(start, end);
+  assert.ok(start >= 0 && end > start, 'pause 路由应存在');
+  assert.ok(/SIGTERM/.test(block) && /process\.kill/.test(block), 'pause 端点应 kill 子进程（SIGTERM 直接暂停）');
+  assert.ok(/cmd:\s*['"]pause['"]/.test(block), 'pause 端点应写 {cmd:"pause"}');
+});
+
+test('server.js pause/stop 的 runId 有 readMem0State().runId 兜底（锁已释放仍可定位）', () => {
+  const pauseM = /handleMem0Pause[\s\S]{0,600}?readMem0State/.exec(serverJs);
+  const stopM = /handleMem0Stop[\s\S]{0,600}?readMem0State/.exec(serverJs) || /handleMem0Stop[\s\S]{0,600}?runId/.exec(serverJs);
+  // 端点内 runId 解析应含 readMem0State().runId 兜底（不依赖 lock）
+  const anyBlock = serverJs.slice(Math.max(0, serverJs.indexOf('handleMem0Pause')), serverJs.indexOf('handleMem0Resume'));
+  assert.ok(anyBlock.includes('readMem0State().runId') || /readMem0State\(\)[\s\S]{0,80}runId/.test(anyBlock),
+    'pause/stop 端点应含 readMem0State().runId 兜底');
+});
+
+test('server.js resume 拒绝 stoppedByUser（停止=取消队列，不可继续）', () => {
+  const start = serverJs.indexOf("p === '/api/mem0/resume'");
+  const end = serverJs.indexOf("p === '/api/mem0/retry'", start);
+  const block = serverJs.slice(start, end);
+  assert.ok(start >= 0 && end > start, 'resume 路由应存在');
+  assert.ok(/stoppedByUser/.test(block), 'resume 应检查 stoppedByUser（停止后不可继续）');
+});
+
+test('前端 pause/stop 请求体带 runId（不再发空 body {}）', () => {
+  const idx = readFileSync(join(M, 'web', 'index.html'), 'utf8');
+  const pauseFn = /function\s+m0Pause[\s\S]*?\n\s*\}/.exec(idx);
+  const stopFn = /function\s+m0Stop[\s\S]*?\n\s*\}/.exec(idx);
+  assert.ok(pauseFn && /runId/.test(pauseFn[0]), 'm0Pause 应带 runId');
+  assert.ok(stopFn && /runId/.test(stopFn[0]), 'm0Stop 应带 runId');
+});

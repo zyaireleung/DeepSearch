@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import sqlite3
 import time
 from typing import Optional
@@ -405,15 +406,41 @@ def _write_mem0_count(memory, root: str) -> None:
         pass  # 尽力而为，失败不阻塞导入
 
 
-def _is_stopped(root: str) -> bool:
+def _stop_kind(root: str) -> Optional[str]:
+    """返回暂停/停止的真实意图，兼容旧布尔格式。"""
     try:
         with open(os.path.join(root, "mem0-control.json"), encoding="utf-8") as f:
             ctrl = json.load(f)
     except Exception:
-        return False
-    # 兼容两种格式：旧候选 {cmd:'pause'/'stop'}（server.js pause/stop 端点写）与 {paused/stopped/stop 布尔}
-    return (bool(ctrl.get("paused")) or bool(ctrl.get("stopped")) or bool(ctrl.get("stop"))
-            or ctrl.get("cmd") in ("pause", "stop"))
+        return None
+    cmd = ctrl.get("cmd")
+    if cmd in ("pause", "stop"):
+        return cmd
+    if bool(ctrl.get("paused")):
+        return "pause"
+    if bool(ctrl.get("stopped")) or bool(ctrl.get("stop")):
+        return "stop"
+    return None
+
+
+def _is_stopped(root: str) -> bool:
+    return _stop_kind(root) is not None
+
+
+class _StopRequested(Exception):
+    """SIGTERM 的可控中断：由 run_import 收尾，而不是让进程直接死亡。"""
+
+
+def _install_sigterm():
+    """让 server 的 pause/stop SIGTERM 立即中断当前批，并正常写 state/count/run.json。"""
+    requested = {"value": False}
+
+    def _handler(_signum, _frame):
+        requested["value"] = True
+        raise _StopRequested()
+
+    previous = signal.signal(signal.SIGTERM, _handler)
+    return requested, previous
 
 
 def _finalize(state: dict) -> None:
@@ -421,7 +448,7 @@ def _finalize(state: dict) -> None:
                                     if not any(fb.get("sessionId") == sid for fb in state["failedBatches"])})
 
 
-def _emit_run_json(state: dict, outcome: str) -> None:
+def _emit_run_json(state: dict, outcome: str, *, stopped_by_user: bool = False) -> None:
     run_json = os.environ.get("MEM0_RUN_JSON")
     if not run_json:
         return
@@ -429,8 +456,8 @@ def _emit_run_json(state: dict, outcome: str) -> None:
         os.makedirs(os.path.dirname(run_json), exist_ok=True)
         with open(run_json, "w", encoding="utf-8") as f:
             json.dump({"outcome": outcome, "done": state["done"], "failed": state["failed"],
-                       "plannedTotal": state["plannedTotal"], "failedBatches": len(state["failedBatches"])},
-                      f, ensure_ascii=False)
+                       "plannedTotal": state["plannedTotal"], "failedBatches": len(state["failedBatches"]),
+                       "stoppedByUser": stopped_by_user}, f, ensure_ascii=False)
     except Exception:
         pass
 
@@ -465,17 +492,21 @@ def run_import(*, root: str, source_db: str, config: dict, memory_factory=None, 
     state["done"] = 0
     state["failed"] = 0
     state["currentBatch"] = None
+    # 规划一完成就落盘：前端进度卡首次显示即读取真实【批数】，不等第一批处理完。
+    save_state(state_path, state)
 
     memory = memory_factory() if memory_factory is not None else None
     segmenter = None
     any_failure = False
     stopped = False
+    stop_signal, previous_sigterm = _install_sigterm()
     for batch in ordered:
-        if _is_stopped(root):
+        if stop_signal["value"] or _is_stopped(root):
             stopped = True
             break
         state["currentBatch"] = {"sessionId": batch["sessionId"], "part": batch["part"],
                                  "partTotal": batch.get("partTotal", batch["part"])}
+        interrupted_batch = False
         try:
             if memory is None:
                 memory = _build_memory(root, config)
@@ -494,24 +525,32 @@ def run_import(*, root: str, source_db: str, config: dict, memory_factory=None, 
             fb = _find_failure(state["failedBatches"], batch["messageIds"])
             if fb is not None:
                 state["failedBatches"].remove(fb)
+        except _StopRequested:
+            # 直接暂停/停止：当前批未完成，不记失败、不推进游标；恢复时从这批重新处理。
+            stopped = True
+            interrupted_batch = True
         except Exception as exc:
             any_failure = True
             state["failed"] += 1
             _record_failure(state["failedBatches"], batch, exc)
         finally:
-            if not batch.get("retry"):
+            if not interrupted_batch and not batch.get("retry"):
                 last = batch["messages"][-1]
                 state["sessionCursors"][batch["sessionId"]] = {"timeMs": last["timeMs"], "id": last["id"]}
             state["currentBatch"] = None
             save_state(state_path, state)
             if after_attempt is not None:
                 after_attempt(batch, state)
+        if interrupted_batch:
+            break
 
     _write_mem0_count(memory, root)
     _finalize(state)
     save_state(state_path, state)
-    outcome = "stopped" if stopped else ("partial-completed" if any_failure else "completed")
-    _emit_run_json(state, outcome)
+    stop_kind = _stop_kind(root) if stopped else None
+    outcome = ("paused" if stop_kind == "pause" else "stopped") if stopped else ("partial-completed" if any_failure else "completed")
+    _emit_run_json(state, outcome, stopped_by_user=(stop_kind == "stop"))
+    signal.signal(signal.SIGTERM, previous_sigterm)
     return state
 
 

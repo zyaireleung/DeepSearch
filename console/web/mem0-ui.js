@@ -10,7 +10,8 @@ function escapeHtml(s) {
 }
 
 export function deriveMem0View(status = {}) {
-  const planned = Number(status.plannedTotal || status.total || 0);
+  // 计划数必须是 importer 规划出的【批数】；status.total 曾在启动阶段承载消息条数，不能回退使用。
+  const planned = Number(status.plannedTotal || 0);
   const done = Number(status.done || 0);
   const failed = Number(status.failed || 0);
   const failures = (status.failedBatches || []).filter((item) => item.status === 'failed');
@@ -21,7 +22,8 @@ export function deriveMem0View(status = {}) {
   const resolved = Number(status.resolvedMessages || 0);
   const total = Number(status.totalMessages || 0);
   // 进度卡显示 = 仅运行/暂停/中断（OV 一致：队列完成即隐藏；失败信息由失败批次卡保留，不驻留进度卡）
-  const showProgress = !status.stoppedByUser && (Boolean(status.running) || Boolean(status.paused) || Boolean(status.interrupted));
+  // 计划尚未落盘时不显示卡片；出现时必已拿到真实批数，避免把消息条数误显示成“批”。
+  const showProgress = !status.stoppedByUser && planned > 0 && (Boolean(status.running) || Boolean(status.paused) || Boolean(status.interrupted));
   return {
     counts: { planned, done, failed, pending: Math.max(0, planned - done) },
     current,
@@ -32,6 +34,12 @@ export function deriveMem0View(status = {}) {
     showProgress,
     showFailures: failures.length > 0,
   };
+}
+
+// 手动导入按钮禁用规则（OV 一致）：仅在【实际运行】时禁用（running），
+// paused 但未运行（子进程已停/软停完成）不禁用 —— 否则遗留暂停 run 会锁死「立即导入」。
+export function deriveMem0RunDisabled(status = {}) {
+  return Boolean(status.running);
 }
 
 export function renderMem0Status(status = {}) {
@@ -48,9 +56,9 @@ export function renderMem0Status(status = {}) {
   set('m0CurSession', view.current);
   const bar = document.getElementById('m0Bar');
   if (bar) bar.style.width = Math.min(100, Math.round((view.counts.done / Math.max(1, view.counts.planned)) * 100)) + '%';
-  // 手动导入按钮：运行/暂停中禁用（OV 一致）
+  // 手动导入按钮：仅实际运行中禁用（OV 一致；paused 但未运行不禁用，避免遗留暂停 run 锁死）
   const btnRun = document.getElementById('btnM0Run');
-  if (btnRun) btnRun.disabled = !!(status.running || status.paused);
+  if (btnRun) btnRun.disabled = deriveMem0RunDisabled(status);
   // 进度卡子标题 + 三按钮（运行三态：写入进行中/已暂停/（停止中无——子进程暂停是软停，无独立 stopping 态））
   const sub = document.getElementById('m0ProgSub');
   const pauseBtn = document.getElementById('m0Pause');

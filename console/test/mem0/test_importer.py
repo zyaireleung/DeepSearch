@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import signal
 import sqlite3
 import tempfile
 import unittest
@@ -506,3 +507,152 @@ class ImporterRealShapeTests(unittest.TestCase):
                     self.assertLessEqual(len(inp), 100 + 30, f"embed input[i] 过长: {len(inp)} chars")
         finally:
             server.stop()
+
+
+class ImporterDirectStopTests(unittest.TestCase):
+    """用户（2026-11-02）：暂停/停止要像旧 mem0 一样【直接】生效（非批边界软停）；
+    已完成的记忆要【立即】计入 mem0-count.json（"Mem0 记忆总量"）；
+    暂停保留队列可"继续"（outcome='paused'，可 resume）；停止取消队列（outcome='stopped' + stoppedByUser，不可 resume）。"""
+
+    def test_stop_kind_distinguishes_pause_and_stop(self):
+        importer = load_importer()
+        self.assertTrue(hasattr(importer, "_stop_kind"), "_stop_kind 应存在")
+        with tempfile.TemporaryDirectory() as tmp:
+            def write_ctrl(obj):
+                with open(os.path.join(tmp, "mem0-control.json"), "w", encoding="utf-8") as f:
+                    json.dump(obj, f)
+            self.assertIsNone(importer._stop_kind(tmp), "无 control → None")
+            write_ctrl({"cmd": "pause"})
+            self.assertEqual(importer._stop_kind(tmp), "pause", "{cmd:pause} → pause")
+            write_ctrl({"cmd": "stop"})
+            self.assertEqual(importer._stop_kind(tmp), "stop", "{cmd:stop} → stop")
+            write_ctrl({"paused": True})
+            self.assertEqual(importer._stop_kind(tmp), "pause", "{paused:true} → pause")
+            write_ctrl({"stopped": True})
+            self.assertEqual(importer._stop_kind(tmp), "stop", "{stopped:true} → stop")
+
+    def test_pause_outcome_is_paused_resumable_and_count_written(self):
+        importer = load_importer()
+        with tempfile.TemporaryDirectory() as tmp:
+            class _FakeColl:
+                def count(self): return 5
+                def query(self, **_kw): return {"ids": [[]], "embeddings": [[]], "metadatas": [[]]}
+            class _FakeMemory:
+                vector_store = type("_S", (), {"collection": _FakeColl()})()
+                def add(self, messages, **_kw): return {"results": []}
+            # 写暂停指令：importer 首个批次检查 _is_stopped → 立即 stopped
+            with open(os.path.join(tmp, "mem0-control.json"), "w", encoding="utf-8") as f:
+                json.dump({"cmd": "pause", "at": 1}, f)
+            db_path = make_session_a_db(tmp)
+            previous_run_json = os.environ.get("MEM0_RUN_JSON")
+            os.environ["MEM0_RUN_JSON"] = os.path.join(tmp, "run.json")
+            try:
+                state = importer.run_import(root=tmp, source_db=str(db_path),
+                    config={"pendingTokenBudget": 50, "userId": "u", "agentId": "a"},
+                    memory_factory=lambda: _FakeMemory(), limit_rows=100)
+            finally:
+                if previous_run_json is None: os.environ.pop("MEM0_RUN_JSON", None)
+                else: os.environ["MEM0_RUN_JSON"] = previous_run_json
+            self.assertEqual(state.get("done"), 0, "直接暂停应不处理任何批")
+            run = json.load(open(os.path.join(tmp, "run.json"), encoding="utf-8"))
+            self.assertEqual(run["outcome"], "paused", "暂停 outcome 应=paused（可 resume）")
+            self.assertFalse(run.get("stoppedByUser"), "暂停不应标 stoppedByUser")
+            d = json.load(open(os.path.join(tmp, "mem0-count.json"), encoding="utf-8"))
+            self.assertEqual(d["count"], 5, "暂停应立即写 mem0-count.json（已完成记忆计数）")
+
+    def test_stop_outcome_is_stopped_cancelled_and_count_written(self):
+        importer = load_importer()
+        with tempfile.TemporaryDirectory() as tmp:
+            class _FakeColl:
+                def count(self): return 3
+                def query(self, **_kw): return {"ids": [[]], "embeddings": [[]], "metadatas": [[]]}
+            class _FakeMemory:
+                vector_store = type("_S", (), {"collection": _FakeColl()})()
+                def add(self, messages, **_kw): return {"results": []}
+            with open(os.path.join(tmp, "mem0-control.json"), "w", encoding="utf-8") as f:
+                json.dump({"cmd": "stop", "at": 1}, f)
+            db_path = make_session_a_db(tmp)
+            previous_run_json = os.environ.get("MEM0_RUN_JSON")
+            os.environ["MEM0_RUN_JSON"] = os.path.join(tmp, "run.json")
+            try:
+                state = importer.run_import(root=tmp, source_db=str(db_path),
+                    config={"pendingTokenBudget": 50, "userId": "u", "agentId": "a"},
+                    memory_factory=lambda: _FakeMemory(), limit_rows=100)
+            finally:
+                if previous_run_json is None: os.environ.pop("MEM0_RUN_JSON", None)
+                else: os.environ["MEM0_RUN_JSON"] = previous_run_json
+            run = json.load(open(os.path.join(tmp, "run.json"), encoding="utf-8"))
+            self.assertEqual(run["outcome"], "stopped", "停止 outcome 应=stopped（取消队列）")
+            self.assertTrue(run.get("stoppedByUser"), "停止应标 stoppedByUser=true（不可 resume）")
+            d = json.load(open(os.path.join(tmp, "mem0-count.json"), encoding="utf-8"))
+            self.assertEqual(d["count"], 3, "停止应立即写 mem0-count.json")
+
+    def test_plan_total_saved_immediately_before_first_batch(self):
+        """本次计划 N 批：importer 在【处理第一批前】就把 total=批数写入 state 文件，
+        使 status 在第一个批次完成前就能读到批数（而非消息条数）。"""
+        importer = load_importer()
+        seen = {}
+        class FakeMemory:
+            _calls = 0
+            def add(self, messages, **_kw):
+                # 只记录【第一次】add：state 文件应已存在且 total=批数
+                FakeMemory._calls += 1
+                if FakeMemory._calls == 1:
+                    p = os.path.join(os.environ.get("_TMP", ""), "mem0-state.json")
+                    if os.path.exists(p):
+                        seen["mid_first_batch_total"] = json.load(open(p, encoding="utf-8")).get("total")
+                    else:
+                        seen["mid_first_batch_total"] = "__MISSING__"
+                return {"results": []}
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["_TMP"] = tmp
+            try:
+                db_path = make_session_a_db(tmp)
+                state = importer.run_import(root=tmp, source_db=str(db_path),
+                    config={"pendingTokenBudget": 50, "userId": "u", "agentId": "a"},
+                    memory_factory=FakeMemory, limit_rows=100)
+            finally:
+                del os.environ["_TMP"]
+            self.assertNotEqual(seen.get("mid_first_batch_total"), "__MISSING__",
+                "第一批 add 前 state 文件应已存在（importer 应先落盘计划再处理）")
+            self.assertEqual(seen.get("mid_first_batch_total"), state["plannedTotal"],
+                "第一批 add 时 state 文件的 total 应已=批数（plannedTotal），而非消息条数")
+
+
+class ImporterSigtermTests(unittest.TestCase):
+    """SIGTERM 直接停止：importer 捕获 SIGTERM，优雅收尾（写 count+run.json+state），
+    使 server 的 pause/stop 端点发送 SIGTERM 后能得到干净终态。"""
+
+    def test_sigterm_installable_and_flags_stop(self):
+        importer = load_importer()
+        self.assertTrue(hasattr(importer, "_install_sigterm") or hasattr(importer, "install_sigterm"),
+            "importer 应暴露安装 SIGTERM 处理的函数")
+
+    def test_sigterm_during_add_stops_without_advancing_cursor_and_writes_count(self):
+        """直接 SIGTERM 中断当前 add：不推进该批游标，仍同步写 count/run.json。"""
+        importer = load_importer()
+        with tempfile.TemporaryDirectory() as tmp:
+            class _FakeColl:
+                def count(self): return 9
+            class _FakeMemory:
+                vector_store = type("_S", (), {"collection": _FakeColl()})()
+                def add(self, _messages, **_kw):
+                    os.kill(os.getpid(), signal.SIGTERM)
+            db_path = make_session_a_db(tmp)
+            with open(os.path.join(tmp, "mem0-control.json"), "w", encoding="utf-8") as f:
+                json.dump({"cmd": "pause"}, f)
+            previous = os.environ.get("MEM0_RUN_JSON")
+            os.environ["MEM0_RUN_JSON"] = os.path.join(tmp, "run.json")
+            try:
+                state = importer.run_import(root=tmp, source_db=str(db_path),
+                    config={"pendingTokenBudget": 50, "userId": "u", "agentId": "a"},
+                    memory_factory=_FakeMemory, limit_rows=100)
+            finally:
+                if previous is None: os.environ.pop("MEM0_RUN_JSON", None)
+                else: os.environ["MEM0_RUN_JSON"] = previous
+            self.assertEqual(state["done"], 0)
+            self.assertEqual(state["sessionCursors"], {}, "中断批不得推进游标")
+            with open(os.path.join(tmp, "run.json"), encoding="utf-8") as f:
+                self.assertEqual(json.load(f)["outcome"], "paused")
+            with open(os.path.join(tmp, "mem0-count.json"), encoding="utf-8") as f:
+                self.assertEqual(json.load(f)["count"], 9)
