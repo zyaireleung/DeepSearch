@@ -18,17 +18,26 @@ test('view uses batch progress and message-level cursor (OV 一致)', () => {
   assert.equal(view.showFailures, true);
 });
 
-test('unresolved failure remains visible after a partial completion', () => {
+test('partial completion hides progress card but preserves failure history (OV 一致)', () => {
   const view = deriveMem0View({ running: false, paused: false, stoppedByUser: false,
     plannedTotal: 4, done: 3, failed: 1, doneSessions: ['session-a'],
     sessionCursors: { 'session-a': { timeMs: 1200, id: 'a-3' } },
     resolvedMessages: 66, totalMessages: 225,
     failedBatches: [{ sessionId: 'session-b', part: 1, attempts: 2, messageCount: 50,
       error: '<timeout>', failedAt: 1000, status: 'failed' }] });
-  assert.equal(view.showProgress, true);
+  // OV 一致：队列完成（running=false）→ 进度卡隐藏；失败信息由失败批次卡保留
+  assert.equal(view.showProgress, false);
   assert.equal(view.showFailures, true);
   assert.equal(view.failures[0].error, '&lt;timeout&gt;');
   assert.equal(view.cursor, '66 / 225');
+});
+
+test('paused run keeps progress card visible with resume affordance (可继续)', () => {
+  const view = deriveMem0View({ running: false, paused: true, stoppedByUser: false,
+    plannedTotal: 4, done: 3, failed: 0,
+    resolvedMessages: 66, totalMessages: 225 });
+  assert.equal(view.showProgress, true);
+  assert.equal(view.counts.pending, 1);
 });
 
 test('user stop hides the active progress controls but preserves failure history', () => {

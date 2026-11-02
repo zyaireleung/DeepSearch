@@ -382,13 +382,38 @@ def _write_probe_record(memory, root: str, user_id: str, agent_id: str, dimensio
         pass  # probe 是尽力而为，失败不阻塞导入
 
 
+def _write_mem0_count(memory, root: str) -> None:
+    """写出 mem0-count.json（"Mem0 记忆总量" 只读快照，server.js mem0CountSnapshot 读取）。
+
+    2026-11-02 用户："生产已导入 7 批为何记忆总量仍为空？"——旧管线从未写该文件（缺口），
+    server 无快照 → UI 恒"—"。修复：run_import 结束时（含 stopped/partial-completed）从
+    Chroma 集合 count() 取库内记忆条数写入 {count, at}。collection 缺失/失败跳过，不阻塞导入。
+    """
+    count_path = os.path.join(root, "mem0-count.json")
+    try:
+        coll = getattr(getattr(memory, "vector_store", None), "collection", None)
+        if coll is None:
+            return
+        n = int(coll.count())
+        import datetime
+        at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        tmp = count_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"count": n, "at": at}, f)
+        os.replace(tmp, count_path)
+    except Exception:
+        pass  # 尽力而为，失败不阻塞导入
+
+
 def _is_stopped(root: str) -> bool:
     try:
         with open(os.path.join(root, "mem0-control.json"), encoding="utf-8") as f:
             ctrl = json.load(f)
     except Exception:
         return False
-    return bool(ctrl.get("paused")) or bool(ctrl.get("stopped")) or bool(ctrl.get("stop"))
+    # 兼容两种格式：旧候选 {cmd:'pause'/'stop'}（server.js pause/stop 端点写）与 {paused/stopped/stop 布尔}
+    return (bool(ctrl.get("paused")) or bool(ctrl.get("stopped")) or bool(ctrl.get("stop"))
+            or ctrl.get("cmd") in ("pause", "stop"))
 
 
 def _finalize(state: dict) -> None:
@@ -411,7 +436,8 @@ def _emit_run_json(state: dict, outcome: str) -> None:
 
 
 def run_import(*, root: str, source_db: str, config: dict, memory_factory=None, limit_batches: int = 0,
-               until_ms: Optional[int] = None, failed_only: bool = False, after_attempt=None) -> dict:
+               until_ms: Optional[int] = None, failed_only: bool = False, after_attempt=None,
+               limit_rows: int = 0) -> dict:
     state_path = os.path.join(root, "mem0-state.json")
     state = load_state(state_path)
     # 配置读取路径统一：mem0Import 嵌套优先，顶层回退（防止 CLI(嵌套) 与 run_import(顶层) 不一致）
@@ -424,12 +450,18 @@ def run_import(*, root: str, source_db: str, config: dict, memory_factory=None, 
 
     retry_batches = _build_retry_batches(state["failedBatches"], source_db)
     rows = read_synced_rows(source_db, state["sessionCursors"], until_ms)
+    # 导入数量=消息条数（同 OV 导入 ovImportN 语义）：limit_rows>0 仅取前 N 条消息（按会话 first-message 排序），0=增量全部
+    if limit_rows > 0:
+        rows = rows[:limit_rows]
     retry_ids = {mid for b in retry_batches for mid in b["messageIds"]}
     new_batches = build_plan([r for r in rows if r["id"] not in retry_ids], token_budget, limit_batches)
 
     ordered = retry_batches if failed_only else (retry_batches + new_batches)
 
     state["plannedTotal"] = len(ordered)
+    # 进度卡单位=批数（同 OV 进度卡"已完成 X 批"）：total 必须=批数而非消息条数。
+    # server.js 候选 state 初始 total 可能=消息条数（limit_rows），此处以批数覆盖为权威值。
+    state["total"] = len(ordered)
     state["done"] = 0
     state["failed"] = 0
     state["currentBatch"] = None
@@ -475,6 +507,7 @@ def run_import(*, root: str, source_db: str, config: dict, memory_factory=None, 
             if after_attempt is not None:
                 after_attempt(batch, state)
 
+    _write_mem0_count(memory, root)
     _finalize(state)
     save_state(state_path, state)
     outcome = "stopped" if stopped else ("partial-completed" if any_failure else "completed")
@@ -491,6 +524,9 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true", help="只规划，不写库、不调模型")
     ap.add_argument("--limit-batches", type=int, default=0, help="限制批数（0=全部）")
     ap.add_argument("--budget", type=int, default=0, help="每批 token 预算（缺省用 config.pendingTokenBudget）")
+    ap.add_argument("--until", type=int, default=0, help="仅解析 time_ms < 此值（毫秒；0=全部）")
+    ap.add_argument("--failed-only", action="store_true", help="仅重试失败批（不解析新消息）")
+    ap.add_argument("--limit-rows", type=int, default=0, help="导入数量=消息条数（0=增量全部；同 OV 导入 ovImportN 语义）")
     args = ap.parse_args(argv)
     cfg = {}
     if args.config and os.path.exists(args.config):
@@ -504,6 +540,8 @@ def main(argv=None):
     token_budget = args.budget or int(m0cfg.get("pendingTokenBudget") or 60000)
     if args.dry_run:
         rows = read_synced_rows(source_db, {})
+        if args.limit_rows > 0:
+            rows = rows[:args.limit_rows]
         plan = build_plan(rows, token_budget, args.limit_batches)
         print(json.dumps({
             "dryRun": True, "plannedTotal": len(plan), "tokenBudget": token_budget,
@@ -512,7 +550,8 @@ def main(argv=None):
         }, ensure_ascii=False))
         return 0
     state = run_import(root=root, source_db=source_db, config=cfg,
-                       limit_batches=args.limit_batches)
+                       limit_batches=args.limit_batches, until_ms=(args.until or None),
+                       failed_only=args.failed_only, limit_rows=args.limit_rows)
     print(json.dumps({"ok": True, "plannedTotal": state.get("plannedTotal"), "done": state.get("done"),
                       "failed": state.get("failed"),
                       "failedBatches": state.get("failedBatches")}, ensure_ascii=False))

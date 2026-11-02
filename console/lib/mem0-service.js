@@ -128,9 +128,8 @@ export function createMem0Service(options = {}) {
     const cfg = getConfig();
     const next = { ...(lifecycle.defaultMem0Import || {}), ...(cfg.mem0Import || {}), ...(partial || {}) };
     next.intervalMin = Math.max(1, Number(next.intervalMin) || 720);
-    next.batchChars = Math.max(1000, Number(next.batchChars) || 30000);
     next.pendingTokenBudget = Math.max(256, Number(next.pendingTokenBudget) || 60000);
-    next.schedBatches = Number(next.schedBatches) || 0;
+    next.importN = Number(next.importN) || 0; // 导入数量=消息条数（0=增量全部；同 OV 导入 ovImportN 语义）
     // searchBaseUrl 仅保留（spread）；默认解析 6610 由 mem0SearchUrl() 承担，不在保存时强写，
     // 避免生产在未钉住前被 UI 保存提前切到 6610。
     cfg.mem0Import = next;

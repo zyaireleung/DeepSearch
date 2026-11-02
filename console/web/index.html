@@ -675,71 +675,65 @@
       </section>
 
       <!-- Mem0 导入（照 8127 沙盒验证版：游标只读 + 记忆总量 + 分 tab 定时/手动 + 进度卡） -->
+      <!-- Mem0 写入（2026-11-02 用户：导入前端交互完全照抄 OV —— 导入方式分 tab/循环设定/导入数量/进度卡/失败批次卡；保留记忆总量） -->
       <section id="panel-mem0import" class="hidden">
-        <div class="flow-hint"><b>Mem0 写入：</b>解析导入（infer=True，LLM 抽取原子记忆）· 会话级游标（每会话独立 {timeMs,id} 双键，按 token 预算分批、不跨会话）· 与 TDB 导入错峰（L1 解析优先，Mem0 排后）。失败批记入失败清单，下次自动优先重试。</div>
+        <div class="flow-hint"><b>Mem0 写入：</b>解析导入（infer=True，LLM 抽取原子记忆）· 会话级游标（每会话 {timeMs,id} 双键，按 token 预算分批、不跨会话）· 导入数量（条数）控制 · 循环定时/手动导入 · 进度 = 已解析消息总数 / 全库消息总数。</div>
         <div class="card">
-          <h3>Mem0 写入 <span class="sub">循环定时与手动导入分 tab 配置 · 范围只选手动 · 错峰</span></h3>
+          <h3>Mem0 写入 <span class="sub">循环定时与手动导入分 tab · 导入数量（条数）控制</span></h3>
           <div class="row"><label>已解析消息</label>
             <span class="cursor-chip">⛳ <b id="m0Resolved">—</b> / <b id="m0ResolvedTotal">—</b></span>
             <span style="color:var(--dim);font-size:11.5px">已解析消息总数 / 全库消息总数 · 随进度实时推进（会话级游标 {timeMs,id} 双键）</span>
           </div>
           <div class="row"><label>Mem0 记忆总量</label><span class="tag g" id="m0MemoryCount" style="font-size:13px">—</span><span style="color:var(--dim);font-size:11.5px">mem0 库内记忆条数（建库后统计）</span></div>
-          <div class="row" style="margin-top:12px"><label>写入方式</label>
+          <div class="row" style="margin-top:12px"><label>导入方式</label>
             <div class="seg" id="m0TabSeg">
               <span data-tab="timer" class="on" onclick="m0Tab(this)">循环定时</span>
               <span data-tab="manual" onclick="m0Tab(this)">手动导入</span>
             </div>
           </div>
           <div id="m0tab-timer">
-            <div class="row"><label>循环间隔</label>
-              <input type="number" id="m0Interval" value="720" min="10" step="60" style="width:110px">
-              <span style="color:var(--dim);font-size:11.5px">分钟 · 每间隔触发一次写入（默认 720 = 12h）</span>
-            </div>
-            <div class="row"><label>循环起点</label>
+            <div class="row"><label>循环设定</label>
               <div class="seg" id="m0StartSeg">
                 <span data-st="daily" class="on" onclick="m0SegStart(this)">每日固定时间</span>
                 <span data-st="at" onclick="m0SegStart(this)">指定时间点</span>
               </div>
               <input type="time" id="m0StartDaily" value="03:00" style="width:110px">
-              <input type="datetime-local" id="m0StartAt" value="2026-10-03T03:00" style="width:220px" class="hidden">
-              <span style="color:var(--dim);font-size:11.5px">错峰：memory 导入约 01:00/13:00，Mem0 写入排后不抢</span>
+              <input type="datetime-local" id="m0StartAt" style="width:200px" class="hidden">
+              <span style="color:var(--dim);font-size:11.5px">循环起点</span>
             </div>
-            <div class="row" id="m0RowNextRun">
-              <label>下次导入</label>
+            <div class="row"><label>循环间隔</label>
+              <input type="number" id="m0Interval" value="720" min="1" step="60" style="width:110px" disabled>
+              <span style="color:var(--dim);font-size:11.5px" id="m0IntervalHint">分钟 · 指定时间点模式下可用（每日固定时间变灰）</span>
+            </div>
+            <div class="row" id="m0RowNextRun"><label>下次导入</label>
               <span class="next-line" id="m0NextRun">—</span>
             </div>
-            <div class="row"><label>每次批数</label>
-              <input type="number" id="m0SchedBatches" value="200" min="1" step="10" style="width:110px">
-              <span style="color:var(--dim);font-size:11.5px">每次触发写入 N 批（会话内 token 预算分批，不跨会话）· LLM 解析慢，分批防单次过久</span>
+            <div class="row"><label>导入数量</label>
+              <input type="number" id="m0ImportN" placeholder="0=增量" style="width:110px">
+              <span style="color:var(--dim);font-size:11.5px">每次导入的条数 · 空或0=增量（全部未处理会话）· 非0=按指定条数</span>
             </div>
             <div class="row" style="margin-top:12px">
-              <button class="btn warn" onclick="saveM0Cfg()">保存配置</button>
+              <button class="btn warn" onclick="m0Save()">保存配置</button>
             </div>
             <div class="row"><label>定时开关</label>
               <span class="switch" id="m0SchedSwitch" onclick="m0ToggleSched(this)"></span>
-              <span style="color:var(--dim);font-size:12px">关闭后定时停止，手动写入仍可用</span>
+              <span style="color:var(--dim);font-size:12px">关闭后定时停止，手动导入仍可用</span>
             </div>
-            <div class="note">循环定时：定时开关 + 循环间隔 + 启动时刻 + 每次批数 N。每次触发处理 N 批（会话内 token 预算分批，不跨会话；LLM 解析 20–60s/条，分批防单次过久），会话游标随进度逐批推进，多轮逐步追平存量后转增量。失败的批记入失败清单，下次自动优先重试。</div>
+            <div class="note">循环定时：定时开关 + 循环设定（每日固定时间 / 指定时间点）+ 循环间隔 + 导入数量。到点自动写入，已解析条数随进度推进。</div>
           </div>
           <div id="m0tab-manual" class="hidden">
-            <div class="row m0-row m0-inactive" id="m0RowCutoff"><label>目标截止</label>
-              <span style="color:var(--dim);font-size:11.5px;font-family:var(--mono)">当前截止</span>
-              <span class="tag g" id="m0CursorText2" style="font-size:12px">加载中…</span>
-              <span style="color:var(--dim);font-size:11.5px;font-family:var(--mono)">→ 目标截止</span>
-              <input type="datetime-local" id="m0ManCutoff" value="2026-10-03T03:00" style="width:200px" onfocus="m0Focus('cutoff')" oninput="m0Focus('cutoff')">
-            </div>
-            <div class="row m0-row m0-active" id="m0RowN"><label>每次批数</label>
-              <input type="number" id="m0ManBatches" value="200" min="1" step="10" style="width:110px" onfocus="m0Focus('n')" oninput="m0Focus('n')">
-              <span style="color:var(--dim);font-size:11.5px">两项可随时切换修改：最后修改/聚焦的一项为执行项，另一项淡化（仍可编辑）</span>
+            <div class="row"><label>导入数量</label>
+              <input type="number" id="m0ManN" placeholder="0=增量" style="width:110px">
+              <span style="color:var(--dim);font-size:11.5px">空或0=增量（全部未处理会话）· 非0=按指定条数</span>
             </div>
             <div class="row" style="margin-top:12px">
-              <button class="btn" onclick="runM0Write()">立即写入（手动）</button>
+              <button class="btn" id="btnM0Run" onclick="m0Run()">▶ 立即导入</button>
             </div>
-            <div class="note">手动导入：写入 [当前游标, 目标截止] 或 [游标, 游标+N 条]（以最后修改项为准）。失败的 L0 记入失败清单，下次自动优先重试。</div>
+            <div class="note">手动导入：按导入数量立即写入一次。失败的批下次自动重试；进行中可暂停/继续/停止。</div>
           </div>
         </div>
 
-        <!-- 写入进度（状态驱动：进行中/暂停/完成但有失败 → 显示；全部成功 → 隐藏） -->
+        <!-- 写入进度（运行/暂停/中断才显示；队列完成即隐藏，失败信息由失败批次卡保留） -->
         <div class="card hidden" id="m0ProgCard">
           <h3>Mem0 写入进度 <span class="sub" id="m0ProgSub">写入进行中</span></h3>
           <div class="prog-nums">
@@ -749,8 +743,8 @@
           </div>
           <div class="prog"><i id="m0Bar" style="width:0%"></i></div>
           <div class="row" style="margin:10px 0 0">
-            <span style="color:var(--dim);font-size:11.5px;font-family:var(--mono)">当前处理 <b id="m0Cur">—</b></span>
-            <span style="color:var(--dim);font-size:11.5px;font-family:var(--mono)">待处理 <b id="m0Pending">—</b> 批</span>
+            <span style="color:var(--dim);font-size:11.5px;font-family:var(--mono)">当前处理 <b id="m0CurSession">—</b></span>
+            <span style="color:var(--dim);font-size:11.5px;font-family:var(--mono)">待处理 <b id="m0PendingNow">—</b> 批</span>
           </div>
           <div class="row" style="margin-top:12px;margin-bottom:0">
             <button class="btn" id="m0Pause" style="display:none" onclick="m0Pause()">⏸ 暂停</button>
@@ -758,16 +752,23 @@
             <button class="btn warn" id="m0Stop" style="display:none" onclick="m0Stop()">■ 停止</button>
             <span style="color:var(--dim);font-size:11.5px" id="m0Hint"></span>
           </div>
-          <div class="note" style="margin-top:10px"><b>显示规则：</b>进行中/暂停 → 显示；<b>完成但有失败（failed&gt;0）→ 保留显示</b>；全部成功完成 → 隐藏。已解析消息随进度实时推进；停止后进度隐藏但失败历史保留。</div>
         </div>
 
-        <!-- 失败批（失败历史；停止后仍保留显示） -->
+        <!-- 失败批次（失败才显示；与 OV 一致：序号/失败时间/所属会话/重试次数/消息条数） -->
         <div class="card hidden" id="m0FailCard">
-          <h3>失败批 <span class="sub">下次自动优先重试</span></h3>
-          <table class="tbl">
-            <thead><tr><th>失败时间</th><th>会话</th><th>尝试</th><th>消息数</th><th>错误</th></tr></thead>
-            <tbody id="m0FailTbody"></tbody>
-          </table>
+          <h3>失败批次</h3>
+          <div style="overflow:auto;margin-top:12px">
+            <table style="width:100%;border-collapse:collapse;font-size:12px">
+              <thead><tr style="color:var(--dim);font-family:var(--mono);font-size:10.5px;letter-spacing:.5px;text-align:left">
+                <th style="padding:8px 10px;border-bottom:1px solid var(--line);font-weight:400">序号</th>
+                <th style="padding:8px 10px;border-bottom:1px solid var(--line);font-weight:400">失败时间</th>
+                <th style="padding:8px 10px;border-bottom:1px solid var(--line);font-weight:400">所属会话</th>
+                <th style="padding:8px 10px;border-bottom:1px solid var(--line);font-weight:400">重试次数</th>
+                <th style="padding:8px 10px;border-bottom:1px solid var(--line);font-weight:400">消息条数</th>
+              </tr></thead>
+              <tbody id="m0FailTbody"></tbody>
+            </table>
+          </div>
         </div>
       </section>
 
@@ -3398,81 +3399,75 @@ loadModelPresets();
 loadOvVlm();
 setInterval(loadStatus, 5000);
 
-// ── Mem0 导入（独立游标 / 记忆总量 / 进度卡状态驱动 / 互斥切换）──
-let m0Active = 'n'; // 手动导入当前激活项（cutoff | n）——最后修改项为执行项
+// ── Mem0 导入（2026-11-02 用户：交互完全照抄 OV —— 导入方式分 tab/循环设定/导入数量/进度卡/失败批次卡；保留记忆总量）──
 let m0LastRunId = ''; // fixes F11: status 暴露的可重试/可续跑 runId（retry/resume 带参）
 let m0PollTimer = null;
-// C 修复：正在编辑中的配置输入框集合（focus/blur 事件驱动，比 activeElement 可靠）——
-// 轮询回填时跳过正在编辑的框，避免把用户修改中的值刷回服务器旧值
+// 正在编辑中的配置输入框集合（focus/blur 事件驱动）：轮询回填时跳过正在编辑的框，避免把用户修改中的值刷回服务器旧值
 const m0Editing = new Set();
-['m0Interval', 'm0SchedBatches', 'm0StartDaily', 'm0StartAt'].forEach((id) => {
+['m0Interval', 'm0ImportN', 'm0StartDaily', 'm0StartAt'].forEach((id) => {
   const el = document.getElementById(id);
   if (!el) return;
-  // 用户一输入即标记「正在编辑」；blur 不清除（改完去点保存也会 blur，清掉会让轮询刷回旧值）
   el.addEventListener('input', () => m0Editing.add(id));
   el.addEventListener('focus', () => m0Editing.add(id));
 });
 // 保存成功后清除编辑标记，让后续轮询回填服务器新值
 function m0ClearEditing() { m0Editing.clear(); }
 function m0Tab(el) {
-  document.querySelectorAll('#m0TabSeg span').forEach(s => s.classList.toggle('on', s === el));
+  document.querySelectorAll('#m0TabSeg span').forEach((s) => s.classList.toggle('on', s === el));
   document.getElementById('m0tab-timer').classList.toggle('hidden', el.dataset.tab !== 'timer');
   document.getElementById('m0tab-manual').classList.toggle('hidden', el.dataset.tab !== 'manual');
 }
+// 循环设定 seg（每日固定时间/指定时间点）——与 OV ovSegStart 同模式：daily→间隔变灰
 function m0SegStart(el) {
-  document.querySelectorAll('#m0StartSeg span').forEach(s => s.classList.toggle('on', s === el));
-  document.getElementById('m0StartDaily').classList.toggle('hidden', el.dataset.st !== 'daily');
-  document.getElementById('m0StartAt').classList.toggle('hidden', el.dataset.st !== 'at');
-  m0Editing.add('m0StartSeg'); // 用户切换了 seg：轮询不得重置（防被服务器旧 startMode 刷回）
+  if (el) {
+    document.querySelectorAll('#m0StartSeg span').forEach((s) => s.classList.toggle('on', s === el));
+    m0Editing.add('m0StartSeg');
+  }
+  m0SyncStartSeg((el && el.dataset.st) || (document.querySelector('#m0StartSeg span.on') || {}).dataset?.st);
 }
-// 按服务器 startMode 同步「每日固定时间/指定时间点」seg 选中态（与手动导入互斥一致：永远一项选中）
 function m0SyncStartSeg(mode) {
   const seg = document.getElementById('m0StartSeg');
   if (!seg) return;
   const st = mode === 'at' ? 'at' : 'daily';
-  document.querySelectorAll('#m0StartSeg span').forEach(s => s.classList.toggle('on', s.dataset.st === st));
-  document.getElementById('m0StartDaily').classList.toggle('hidden', st !== 'daily');
-  document.getElementById('m0StartAt').classList.toggle('hidden', st !== 'at');
-}
-function m0Focus(which) {
-  // 焦点/最后修改驱动：不硬禁用，只淡化另一项（仍可随时切换修改）
-  m0Active = which;
-  const rc = document.getElementById('m0RowCutoff');
-  const rn = document.getElementById('m0RowN');
-  if (which === 'cutoff') { rn.classList.add('m0-inactive'); rn.classList.remove('m0-active'); rc.classList.add('m0-active'); rc.classList.remove('m0-inactive'); }
-  else { rc.classList.add('m0-inactive'); rc.classList.remove('m0-active'); rn.classList.add('m0-active'); rn.classList.remove('m0-inactive'); }
+  document.querySelectorAll('#m0StartSeg span').forEach((s) => s.classList.toggle('on', s.dataset.st === st));
+  const daily = st !== 'at';
+  document.getElementById('m0StartDaily').classList.toggle('hidden', !daily);
+  document.getElementById('m0StartAt').classList.toggle('hidden', daily);
+  document.getElementById('m0Interval').disabled = daily;
+  const hint = document.getElementById('m0IntervalHint');
+  if (hint) hint.style.opacity = daily ? '.4' : '1';
 }
 async function loadM0Status() {
-  const s = await api('/api/mem0/status');
-  if (!s || !s.ok) return;
-  const c = s.config || {};
-  if (s.runId) m0LastRunId = s.runId; // fixes F11: 重试/继续按钮带 runId
-  const cursorTxt = (s.resolvedMessages > 0 || s.totalMessages > 0) ? `${s.resolvedMessages} / ${s.totalMessages}` : '（未写入，游标待建立）';
-  document.getElementById('m0CursorText2').textContent = cursorTxt;
-  const mc = document.getElementById('m0MemoryCount');
-  if (mc) mc.textContent = s.memoryCountStatus === 'index-unverified' ? '索引待恢复' : (s.memoryCount != null ? String(s.memoryCount) : '—');
-  // C 修复：轮询只在输入框「未被编辑」时回填（m0Editing 由 focus/blur 维护），避免把用户正在修改的值刷回服务器旧值
-  const fillIfIdle = (id, v) => { const el = document.getElementById(id); if (el && !m0Editing.has(id)) el.value = (v === undefined || v === null) ? '' : v; };
-  if (c.intervalMin) fillIfIdle('m0Interval', c.intervalMin);
-  if (c.schedBatches !== undefined && c.schedBatches !== null) {
-    // 0 = 增量导入（留空显示），>0 = 限制批数
-    fillIfIdle('m0SchedBatches', (c.schedBatches === 0 || c.schedBatches === '') ? '' : c.schedBatches);
-  }
-  if (c.startDaily) fillIfIdle('m0StartDaily', c.startDaily);
-  if (c.startAt) fillIfIdle('m0StartAt', c.startAt);
-  // 同步「每日固定时间/指定时间点」选中态（按服务器 startMode；seg 未被用户切换时）
-  if (!m0Editing.has('m0StartSeg')) m0SyncStartSeg(c.startMode);
-  // 定时开关同步（从服务器配置读取；与 8126 wikiToggleSched 一致：保存配置后才生效）
-  const m0Sw = document.getElementById('m0SchedSwitch');
-  if (m0Sw) m0Sw.classList.toggle('on', !!c.enabled);
-  // batch/session 进度 + 失败卡：经 mem0-ui.js 的 deriveMem0View/renderMem0Status（模块；未加载则跳过）
-  if (s.runId) m0LastRunId = s.runId; // fixes F11: 重试/继续按钮带 runId
-  if (globalThis.renderMem0Status) globalThis.renderMem0Status(s);
-  const show = s.running || s.paused || !!s.interrupted || (!s.stoppedByUser && s.failed > 0 && s.done > 0 && !s.running);
-  if (show && !m0PollTimer) { m0PollTimer = setInterval(loadM0Status, 2000); }
-  else if (!show && m0PollTimer) { clearInterval(m0PollTimer); m0PollTimer = null; }
-  // 渲染 mem0 下次写入时间
-  renderM0NextRun(c, s.nextRunAt);
+  try {
+    const st = await api('/api/mem0/status');
+    if (!st || !st.ok) return;
+    if (st.runId) m0LastRunId = st.runId; // fixes F11: 重试/继续按钮带 runId
+    const c = st.config || {};
+    // 顶部游标：已解析消息 / 全库消息
+    $('m0Resolved').textContent = st.resolvedMessages || 0;
+    $('m0ResolvedTotal').textContent = st.totalMessages || 0;
+    // 记忆总量（保留）
+    const mc = document.getElementById('m0MemoryCount');
+    if (mc) mc.textContent = st.memoryCountStatus === 'index-unverified' ? '索引待恢复' : (st.memoryCount != null ? String(st.memoryCount) : '—');
+    // 配置回填（导入数量=消息条数；0=增量留空；轮询跳过正在编辑框）
+    const fillIfIdle = (id, v) => { const el = document.getElementById(id); if (el && !m0Editing.has(id)) el.value = (v === undefined || v === null) ? '' : v; };
+    if (c.intervalMin) fillIfIdle('m0Interval', c.intervalMin);
+    if (c.importN !== undefined && c.importN !== null) fillIfIdle('m0ImportN', (c.importN === 0 || c.importN === '') ? '' : c.importN);
+    if (c.startDaily) fillIfIdle('m0StartDaily', c.startDaily);
+    if (c.startAt) fillIfIdle('m0StartAt', c.startAt);
+    if (!m0Editing.has('m0StartSeg')) m0SyncStartSeg(c.startMode);
+    // 定时开关同步（保存配置后才生效）
+    const m0Sw = document.getElementById('m0SchedSwitch');
+    if (m0Sw) m0Sw.classList.toggle('on', !!c.enabled);
+    // 进度卡 + 失败卡（mem0-ui.js deriveMem0View/renderMem0Status）
+    if (globalThis.renderMem0Status) globalThis.renderMem0Status(st);
+    // 快速轮询：运行/暂停/中断 → 2s；否则慢轮询（底部 10s 常驻）
+    const show = st.running || st.paused || !!st.interrupted;
+    if (show && !m0PollTimer) { m0PollTimer = setInterval(loadM0Status, 2000); }
+    else if (!show && m0PollTimer) { clearInterval(m0PollTimer); m0PollTimer = null; }
+    // 渲染 Mem0 下次写入时间
+    renderM0NextRun(c, st.nextRunAt);
+  } catch (e) { toast('Mem0 状态读取失败: ' + e.message); }
 }
 // 渲染 Mem0 下次导入行：优先用 server 的权威 nextRunAt（后端已 arm），回退本地算（与 TDB computeNextRun 同逻辑：daily/at/now）；格式与 TDB「下次导入」一致
 function renderM0NextRun(cfg, serverNextRunAt) {
@@ -3485,7 +3480,6 @@ function renderM0NextRun(cfg, serverNextRunAt) {
     el.textContent = '—';
     return;
   } else {
-    // 后端未 arm 时本地算兜底（沙盒/生产兼容）
     const min = Math.max(1, Number(cfg.intervalMin) || 720);
     const intervalMs = min * 60 * 1000;
     const now = Date.now();
@@ -3527,46 +3521,36 @@ async function m0ToggleSched(el) {
     toast('开关失败: ' + e.message);
   }
 }
-async function saveM0Cfg() {
-  const schedV = document.getElementById('m0SchedBatches').value.trim();
-  // 循环起点：永远有一项被选中（seg .on 驱动，同手动导入互斥语义）
+async function m0Save() {
+  // 循环起点：永远有一项被选中（seg .on 驱动，同 OV ovSave）
   const segOn = document.querySelector('#m0StartSeg span.on');
   const startMode = (segOn && segOn.dataset.st) || 'daily';
   const body = {
     mem0Import: {
-      intervalMin: Number(document.getElementById('m0Interval').value) || 720,
-      schedBatches: schedV === '' ? 0 : (Number(schedV) || 200), // 留空 = 增量导入（不限制批数）
-      startMode, // 显式提交：每日固定时间 | 指定时间点
+      mode: 'sched',
+      startMode,
       startDaily: document.getElementById('m0StartDaily').value,
       startAt: document.getElementById('m0StartAt').value,
+      intervalMin: Number(document.getElementById('m0Interval').value) || 720,
+      importN: Number(document.getElementById('m0ImportN').value) || 0, // 导入数量=消息条数（0=增量）
     },
   };
   const r = await api('/api/mem0/config', { method: 'POST', body: JSON.stringify(body) });
   if (r.ok) { m0ClearEditing(); toast('Mem0 配置已保存'); }
   else toast('保存失败: ' + (r.reason || ''));
 }
-async function runM0Write() {
-  const c = document.getElementById('m0ManCutoff');
-  const n = document.getElementById('m0ManBatches');
-  const useCutoff = m0Active === 'cutoff';
-  if (useCutoff) {
-    // 目标截止模式：只发截止时间（互斥，不发条数）→ 后端全量处理到截止
-    const cutoff = c.value || '';
-    if (!cutoff) { toast('请先选择目标截止时间'); return; }
-    const r = await api('/api/mem0/write', { method: 'POST', body: JSON.stringify({ cutoff }) });
-    if (r.ok) toast('Mem0 手动写入已触发（截止到 ' + cutoff + '）');
-    else toast('触发失败: ' + (r.reason || ''));
-    return;
-  }
-  const limit = n.value.trim() === '' ? 0 : (Number(n.value) || 200); // 留空 = 增量导入（不限制批数）
-  const r = await api('/api/mem0/write', { method: 'POST', body: JSON.stringify({ limitBatches: limit }) });
-  if (r.ok) toast('Mem0 手动写入已触发' + (limit === 0 ? '（增量导入）' : '（按条数批次 ' + limit + '）'));
-  else toast('触发失败: ' + (r.reason || ''));
+async function m0Run() {
+  const importN = Number(document.getElementById('m0ManN').value) || 0; // 导入数量=消息条数
+  try {
+    const r = await api('/api/mem0/write', { method: 'POST', body: JSON.stringify({ importN }) });
+    if (!r.ok) { toast('启动失败: ' + (r.reason || '')); return; }
+    toast('Mem0 手动写入已触发' + (importN === 0 ? '（增量导入）' : '（按指定条数 ' + importN + '）'));
+    loadM0Status();
+  } catch (e) { toast('启动失败: ' + e.message); }
 }
-async function m0Pause() { const r = await api('/api/mem0/pause', { method: 'POST', body: '{}' }); toast(r.ok ? '已发送暂停（游标保留，可继续）' : '暂停失败: ' + (r.reason || '')); }
-async function m0Resume() { const r = await api('/api/mem0/resume', { method: 'POST', body: JSON.stringify({ runId: m0LastRunId }) }); toast(r.ok ? '已继续（从已处理处续跑）' : '继续失败: ' + (r.reason || '')); }
-async function m0Stop() { const r = await api('/api/mem0/stop', { method: 'POST', body: '{}' }); toast(r.ok ? '已停止（游标=当前处理位置）' : '停止失败: ' + (r.reason || '')); }
-async function m0RetryFail() { const r = await api('/api/mem0/retry', { method: 'POST', body: JSON.stringify({ runId: m0LastRunId }) }); toast(r.ok ? (r.started ? '已触发仅重试失败' : (r.reason || '失败清单为空')) : '重试失败: ' + (r.reason || '')); }
+async function m0Pause() { try { const r = await api('/api/mem0/pause', { method: 'POST', body: '{}' }); toast(r.ok ? '已发送暂停（当前批完成后停止，游标保留）' : '暂停失败: ' + (r.reason || '')); loadM0Status(); } catch (e) { toast(e.message); } }
+async function m0Resume() { try { const r = await api('/api/mem0/resume', { method: 'POST', body: JSON.stringify({ runId: m0LastRunId }) }); toast(r.ok ? '已继续（从已处理处续跑）' : '继续失败: ' + (r.reason || '')); loadM0Status(); } catch (e) { toast(e.message); } }
+async function m0Stop() { try { const r = await api('/api/mem0/stop', { method: 'POST', body: '{}' }); toast(r.ok ? '已停止（游标=当前处理位置）' : '停止失败: ' + (r.reason || '')); loadM0Status(); } catch (e) { toast(e.message); } }
 loadM0Status();
 setInterval(loadM0Status, 10000);
 

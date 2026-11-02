@@ -320,6 +320,117 @@ class ImporterPlanningTests(unittest.TestCase):
             self.assertAlmostEqual(vec[0], 0.1)
 
 
+class ImporterStopControlTests(unittest.TestCase):
+    """_is_stopped 双格式兼容（2026-11-02 用户：暂停按钮修复）：
+    server.js pause/stop 端点写 {cmd:'pause'/'stop'}，而旧 importer 只查 {paused/stopped/stop} 布尔
+    → 暂停永远不生效（done 持续增长）。修复后两种格式都判定为 stopped。"""
+
+    def test_is_stopped_double_compatible(self):
+        importer = load_importer()
+        with tempfile.TemporaryDirectory() as tmp:
+            def write_ctrl(obj):
+                with open(os.path.join(tmp, "mem0-control.json"), "w", encoding="utf-8") as f:
+                    json.dump(obj, f)
+            # 无文件 → False
+            self.assertFalse(importer._is_stopped(tmp), "无 control 文件不应停止")
+            # {cmd:'pause'} → True（server.js /api/mem0/pause 端点写）
+            write_ctrl({"cmd": "pause", "at": 1})
+            self.assertTrue(importer._is_stopped(tmp), "{cmd:pause} 应停止")
+            # {cmd:'stop'} → True（server.js /api/mem0/stop 端点写）
+            write_ctrl({"cmd": "stop", "at": 1})
+            self.assertTrue(importer._is_stopped(tmp), "{cmd:stop} 应停止")
+            # 旧布尔格式兼容
+            write_ctrl({"paused": True})
+            self.assertTrue(importer._is_stopped(tmp), "{paused:true} 应停止")
+            write_ctrl({"stopped": True})
+            self.assertTrue(importer._is_stopped(tmp), "{stopped:true} 应停止")
+            write_ctrl({"stop": True})
+            self.assertTrue(importer._is_stopped(tmp), "{stop:true} 应停止")
+            # {cmd:'other'} 不应误停
+            write_ctrl({"cmd": "other"})
+            self.assertFalse(importer._is_stopped(tmp), "{cmd:other} 不应停止")
+
+
+class ImporterLimitRowsTests(unittest.TestCase):
+    """导入数量=消息条数（2026-11-02 用户：同 OV 导入 ovImportN 语义）：
+    limit_rows>0 只取前 N 条消息；0=增量全部。state['total'] 应=批数（plannedTotal），
+    而非消息条数（进度卡显示"已完成 X 批"）。"""
+
+    def test_limit_rows_is_message_count_and_total_is_batch_count(self):
+        importer = load_importer()
+        completed = []
+        class FakeMemory:
+            def add(self, messages, **_kwargs):
+                completed.extend(m["id"] for m in messages)
+                return {"results": []}
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = make_session_a_db(tmp)  # 187 条消息
+            state = importer.run_import(
+                root=tmp, source_db=str(db_path),
+                config={"pendingTokenBudget": 50, "userId": "u", "agentId": "a"},
+                memory_factory=FakeMemory, limit_rows=100,  # 只导入前 100 条消息
+            )
+            # limit_rows=消息条数：只处理 100 条
+            self.assertEqual(len(completed), 100, f"limit_rows=100 应只处理 100 条（实际 {len(completed)}）")
+            # total = 批数（进度卡单位），不是消息条数 100
+            self.assertEqual(state["total"], state["plannedTotal"], "total 应=批数（plannedTotal）")
+            self.assertGreater(state["total"], 0, "应有至少 1 批")
+            self.assertLessEqual(state["total"], 3, "100 条/50 token 应 ≤3 批")
+            # limit_rows=0 → 增量全部（游标已到 a-099，剩余 87 条）
+            state2 = importer.run_import(
+                root=tmp, source_db=str(db_path),
+                config={"pendingTokenBudget": 50, "userId": "u", "agentId": "a"},
+                memory_factory=FakeMemory, limit_rows=0,
+            )
+            self.assertEqual(len(completed), 187, f"limit_rows=0 应导入全部剩余（实际 {len(completed)}）")
+            self.assertEqual(state2["total"], state2["plannedTotal"])
+
+
+class ImporterMem0CountTests(unittest.TestCase):
+    """mem0-count.json 写入（2026-11-02 用户：为何"Mem0 记忆总量"为空？）：
+    importer 从未写 mem0-count.json → server 无快照 → UI 恒"—"。修复：run_import 结束时
+    写 {count: coll.count(), at}（Chroma 集合条数=库内记忆条数）；collection 缺失则跳过不写。"""
+
+    def test_write_mem0_count_uses_collection_count(self):
+        importer = load_importer()
+        with tempfile.TemporaryDirectory() as tmp:
+            class _FakeColl:
+                def count(self):
+                    return 23
+            class _FakeMemory:
+                vector_store = type("_S", (), {"collection": _FakeColl()})()
+            importer._write_mem0_count(_FakeMemory(), tmp)
+            d = json.load(open(os.path.join(tmp, "mem0-count.json"), encoding="utf-8"))
+            self.assertEqual(d["count"], 23, "count 应=Chroma 集合条数")
+            self.assertIn("at", d, "应带时间戳")
+
+    def test_write_mem0_count_skips_without_collection(self):
+        importer = load_importer()
+        with tempfile.TemporaryDirectory() as tmp:
+            importer._write_mem0_count(object(), tmp)  # 无 vector_store → 跳过
+            self.assertFalse(os.path.exists(os.path.join(tmp, "mem0-count.json")),
+                             "无 collection 不应写 count 文件")
+
+    def test_run_import_writes_count_on_completion(self):
+        importer = load_importer()
+        with tempfile.TemporaryDirectory() as tmp:
+            class _FakeColl:
+                def count(self):
+                    return 2
+                def query(self, **_kw):
+                    return {"ids": [[]], "embeddings": [[]], "metadatas": [[]]}
+            class _FakeMemory:
+                vector_store = type("_S", (), {"collection": _FakeColl()})()
+                def add(self, messages, **_kw):
+                    return {"results": []}
+            db_path = make_session_a_db(tmp)
+            importer.run_import(root=tmp, source_db=str(db_path),
+                config={"pendingTokenBudget": 50, "userId": "u", "agentId": "a"},
+                memory_factory=lambda: _FakeMemory(), limit_rows=100)
+            d = json.load(open(os.path.join(tmp, "mem0-count.json"), encoding="utf-8"))
+            self.assertEqual(d["count"], 2, "run_import 完成应写 count 文件")
+
+
 class ImporterIntegrationTests(unittest.TestCase):
     def test_progress_failure_retry_and_cursor_persistence(self):
         importer = load_importer()
