@@ -5,8 +5,15 @@
   "type": "module",
   "description": "deep_search 插件 host：注册 deep_search/deep_search_next/deep_search_read/deep_search_status/deep_search_sync 五工具 + 检索导引注入 + 侧边栏只读卡片（适配层，转发 DeepSearch Console :6600，绝不写总表）",
   "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" }
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": { "platform": "web" }
   },
   "scripts": {
     "build": "bash scripts/build.sh",

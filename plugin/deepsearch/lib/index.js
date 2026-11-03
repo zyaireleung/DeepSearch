@@ -11,7 +11,7 @@
  * 不存在 ctx.registerTool / ctx.registerPanel / ctx.onSessionInit —— 旧假接口已移除。
  */
 import { ApiClient, ApiClientError } from "./api/client.js";
-import { loadConfigFile } from "./api/routes.js";
+import { loadConfigFile, consoleBaseUrl, routes } from "./api/routes.js";
 import { buildTools } from "./tools.js";
 import { loadAndValidate } from "./prompts/loader.js";
 import { renderSourceCatalog, sourceCatalogFallback } from "./guidance.js";
@@ -30,6 +30,87 @@ function mountGuide(ctx, systemGuide, attempts = 20) {
         return;
     }
     ctx.logger?.warn?.("deep-search: systemPrompt 服务 20s 内未就绪，导引未挂载（工具不受影响）");
+}
+// ── agent/pre-step 记忆召回（联动 Console；召回逻辑全在 Console 侧 evokeRecall，插件薄转发）──
+/** 取 decision.messages 最后一条真实 user 消息的纯文本（照 tdai getLastUserText 语义）。 */
+function lastUserText(messages) {
+    if (!Array.isArray(messages)) return "";
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m?.source?.kind !== "user") continue;
+        const c = m.content;
+        if (typeof c === "string") return c;
+        if (Array.isArray(c)) {
+            return c.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join("\n");
+        }
+    }
+    return "";
+}
+/**
+ * 挂载 agent/pre-step 钩子：每轮取最后一条 user 文本 → 转发 Console /api/evoke/recall →
+ * 命中且非空则构造独立 snapshot user 消息，插到最后一条 user 消息之前。
+ *
+ * 插入契约（照 tdai v0.3.1 已验证形态）：独立 id + 独立 source(plugin=form:snapshot)，绝不复制用户消息字段
+ * （复制 id/rpcId 会导致 host 把胶囊与真实用户消息合并渲染、用户正文被覆盖丢失）。Console 不可达/未命中/异常
+ * 一律原样放行 decision，绝不阻断对话。
+ */
+function mountEvokePrestep(ctx, client) {
+    if (typeof ctx.on !== "function") return;
+    ctx.on("agent/pre-step", async (payload, next) => {
+        let decision;
+        try {
+            decision = await next();
+        } catch {
+            return undefined;
+        }
+        try {
+            if (!decision || decision.kind !== "enter" || payload?.signal?.aborted) return decision;
+            if (!Array.isArray(decision.messages) || decision.messages.length === 0) return decision;
+            if (decision.agent?.session?.header?.origin === "subagent") return decision;
+            const text = lastUserText(decision.messages);
+            if (!text.trim()) return decision;
+            // 薄转发 Console 召回（召回/判定/准入/渲染全在 Console 侧 evokeRecall，插件不重造）
+            const base = client.base;
+            const ctrl = new AbortController();
+            const t = setTimeout(() => ctrl.abort(), client.timeoutMs ?? 8000);
+            let r;
+            try {
+                const resp = await fetch(routes.evokeRecall(base), {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ text }),
+                    signal: ctrl.signal,
+                });
+                r = await resp.json().catch(() => null);
+            } finally {
+                clearTimeout(t);
+            }
+            const block = r?.hit ? String(r.block || "") : "";
+            if (!r?.ok || !block.trim()) return decision;
+            // 全新构造独立消息，插到最后一条 user 之前（对齐 meow createUserMessage 形态）
+            const lastUser = [...decision.messages].reverse().find((m) => m?.source?.kind === "user");
+            if (lastUser === undefined) return decision;
+            const evokeMsg = {
+                id: `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+                role: "user",
+                content: [{ type: "text", text: block }],
+                source: {
+                    kind: "user",
+                    plugin: "deep-search",
+                    form: "snapshot",
+                    sections: [{ name: "__meta__", text: JSON.stringify({ kind: "hit", mode: r.mode, query: r.query }) }],
+                },
+            };
+            const rewritten = [...decision.messages];
+            rewritten.splice(rewritten.indexOf(lastUser), 0, evokeMsg);
+            ctx.logger?.info?.(`deep-search: evoke mode=${r.mode} query=${JSON.stringify(r.query)} capsule=${block.length}chars injected`);
+            return { ...decision, messages: rewritten };
+        } catch (e) {
+            ctx.logger?.warn?.(`deep-search: pre-step evoke 失败（不阻断）: ${e?.message ?? String(e)}`);
+            return decision;
+        }
+    });
+    ctx.logger?.info?.("deep-search: agent/pre-step 记忆召回钩子已挂载（Console 侧 evokeRecall）");
 }
 /**
  * cordis 插件依赖声明：等待 `tools` 服务就绪后才执行 apply。
@@ -66,6 +147,8 @@ export async function register(ctx) {
     }
     const systemGuide = `${catalogBlock}\n\n${prompts.systemGuide}`;
     mountGuide(ctx, systemGuide);
+    // agent/pre-step 记忆召回钩子（联动 Console evokeRecall）：Console 不可达/未命中时静默放行，不影响工具
+    mountEvokePrestep(ctx, client);
 }
 /** cordis 插件名：patch 条目 id/name 引用包名，Node 解析到 lib/index.js。 */
 export const name = "deep-search";

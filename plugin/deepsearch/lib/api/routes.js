@@ -52,6 +52,8 @@ export const routes = {
     sync: (base) => `${base}/sync`,
     syncJob: (base, jobId) => `${base}/sync/${encodeURIComponent(jobId)}`,
     sourceCatalog: (base) => `${base}/source-catalog`,
+    /** agent/pre-step 记忆召回：Console 侧唯一实现（evokeRecall），插件薄转发，绝不本地重造判定/检索。 */
+    evokeRecall: (base) => `${base}/api/evoke/recall`,
 };
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "::1"]);
 /**

@@ -1,4 +1,30 @@
 {
   "mode": "production",
-  "consoleUrl": "http://127.0.0.1:6600"
+  "consoleUrl": "http://127.0.0.1:6600",
+  "evoke": {
+    "enabled": true,
+    "modes": {
+      "A": false,
+      "B": true
+    },
+    "signalWords": [
+      "之前的",
+      "还记得",
+      "之前不是"
+    ],
+    "commandWords": [
+      "之前说的",
+      "还记得",
+      "之前不是",
+      "回忆之前",
+      "记忆里有没有",
+      "搜一下记忆",
+      "回忆一下"
+    ],
+    "sourcePreset": "fuzzy_mem0_find",
+    "cmdText": "**[使用工具“deep_search”，可继续深入查询相关记忆]**",
+    "p1Base": 900,
+    "p1Max": 1300,
+    "p2Max": 400
+  }
 }
