@@ -480,9 +480,12 @@
       <a data-panel="wikiconfig">Wiki 配置</a>
       <div class="nav-sep">INJECT SETTING</div>
       <a data-panel="evoke">唤起配置</a>
+      <div class="nav-sep">HARNESS</div>
+      <a data-panel="harness">Harness</a>
       <div class="nav-sep">PLUGIN</div>
       <a data-panel="src">数据源</a>
       <a data-panel="rec">记录</a>
+      <a data-panel="logs">日志</a>
       <a data-panel="cfg">配置</a>
       <div class="nav-sep">SYSTEM</div>
       <a data-panel="about">关于</a>
@@ -879,10 +882,9 @@
 
       </section>
 
-      <!-- 唤起方式（tdai-memory-inject · 阶段5） -->
+      <!-- 唤起方式（DeepSearch 四源统一胶囊 · 接管 tdai） -->
       <section id="panel-evoke" class="hidden">
-        <div class="card"><h3>唤起方式 <span class="sub">可单选 / 多选组合 · 保存即 dsh 插件热生效（无需重启）</span></h3>
-        <div class="note" style="background:rgba(255,180,0,.08);border-color:rgba(255,180,0,.3);color:var(--warn);margin-bottom:12px">⚠️ <b>服务暂时不可用</b>：tdai-memory-inject 插件尚未部署，配置暂不生效。接口位预留，待插件就绪后自动启用。</div>
+        <div class="card"><h3>唤起方式 <span class="sub">保存即写入 deepsearch 插件 config.evoke（沙盒 6601）</span></h3>
 
           <!-- A -->
           <div class="mode-box active" id="modeBoxA">
@@ -890,40 +892,21 @@
               <span class="switch" id="swA" onclick="toggleEvokeMode('A')"></span>
               <span class="mode-title">A · 信号词门控</span>
               <span class="tag g">推荐</span>
-              <span style="color:var(--dim);font-size:12px;margin-left:auto">命中信号词 → 深度检索（Mem0+L1+L0，topK 大）</span>
+              <span style="color:var(--dim);font-size:12px;margin-left:auto">命中信号词 → 整句作 query → deep_search fuzzy_mem0_find</span>
             </div>
-            <div class="mode-desc">消息中出现信号词即触发三板块检索。最省 token、命中即精准。</div>
             <div class="mode-sub">
               <label>信号词表（逗号分隔）</label>
               <input type="text" id="inSignalWords" style="width:94%">
             </div>
           </div>
 
-          <!-- B -->
-          <div class="mode-box active" id="modeBoxB">
+          <!-- B（原 C） -->
+          <div class="mode-box" id="modeBoxB">
             <div class="mode-head">
               <span class="switch" id="swB" onclick="toggleEvokeMode('B')"></span>
-              <span class="mode-title">B · 语义兜底</span>
-              <span class="tag g">推荐</span>
-              <span style="color:var(--dim);font-size:12px;margin-left:auto">无信号词也每轮语义搜索 → 相关度达标才注入</span>
+              <span class="mode-title">B · 显式指令</span>
+              <span style="color:var(--dim);font-size:12px;margin-left:auto">只有明确说"查记忆/回忆 XX"才检索，信号词与标点符号之间的文本为query→ deep_search fuzzy_mem0_find</span>
             </div>
-            <div class="mode-desc">每轮对最后一条消息做 Mem0 语义检索，按相关度阈值决定是否注入。全自动、无漏触发。</div>
-            <div class="mode-sub">
-              <label>相关度阈值</label>
-              <input type="range" id="thB" min="0.3" max="0.8" step="0.05" value="0.55" style="width:200px" oninput="document.getElementById('thBVal').textContent=this.value">
-              <span style="color:var(--acc)" id="thBVal">0.55</span>
-              <span style="color:var(--dim);margin-left:12px">越高越少注入（省 token），越低越常唤起（灵敏）</span>
-            </div>
-          </div>
-
-          <!-- C -->
-          <div class="mode-box" id="modeBoxC">
-            <div class="mode-head">
-              <span class="switch" id="swC" onclick="toggleEvokeMode('C')"></span>
-              <span class="mode-title">C · 显式指令</span>
-              <span style="color:var(--dim);font-size:12px;margin-left:auto">只有明确说"查记忆/回忆 XX"才深度检索</span>
-            </div>
-            <div class="mode-desc">指令式唤起：用户显式要求才检索（Mem0+L1+L0，topK 大）。最精准、token 成本最低。</div>
             <div class="mode-sub">
               <label>指令词表（逗号分隔）</label>
               <input type="text" id="inCommandWords" style="width:94%">
@@ -936,37 +919,17 @@
           </div>
         </div>
 
-        <div class="card"><h3>记忆筛选配置 <span class="sub">① 筛选记忆直接呈现 · ② 主动查询入口</span></h3>
-          <div class="note" style="font-family:var(--mono);font-size:11px;padding:4px 10px;display:inline-block;color:var(--warn);background:rgba(255,184,107,.08);border:1px solid rgba(255,184,107,.25)">① 筛选记忆直接呈现</div>
-
-          <div class="section-title" style="font-family:var(--mono);font-size:12px;color:var(--acc);border-left:2px solid var(--acc);padding-left:10px;margin:14px 0 8px">板块一 · Mem0 命中 + TDB L1（精炼记忆）</div>
+        <div class="card"><h3>记忆筛选配置</h3>
+          <div class="section-title" style="font-family:var(--mono);font-size:12px;color:var(--acc);border-left:2px solid var(--acc);padding-left:10px;margin:14px 0 8px">板块一 · 检索源预设</div>
           <div class="row">
-            <label>质量线系数</label><input type="number" id="inQCoef" value="0.85" step="0.01" min="0.5" max="0.99" style="width:70px">
-            <label style="margin-left:14px">质量线兜底</label><input type="number" id="inQFloor" value="0.48" step="0.01" min="0.3" max="0.8" style="width:70px">
+            <label>检索源</label>
+            <select id="inSourcePreset" style="width:auto">
+              <option value="fuzzy_mem0_find">fuzzy_mem0_find（mem0 + ov_context）</option>
+              <option value="fuzzy_history">fuzzy_history（mem0 + ov_context + wiki:history）</option>
+              <option value="fuzzy_full">fuzzy_full（mem0 + ov_context + ov_session + wiki）</option>
+            </select>
           </div>
-          <div class="row">
-            <label>强相关线系数</label><input type="number" id="inSCoef" value="0.93" step="0.01" min="0.5" max="0.99" style="width:70px">
-            <label style="margin-left:14px">强相关线兜底</label><input type="number" id="inSFloor" value="0.52" step="0.01" min="0.3" max="0.8" style="width:70px">
-          </div>
-          <div class="row">
-            <label>候选池 top_k</label><input type="number" id="inTopK" value="10" min="1" max="20" style="width:60px">
-          </div>
-          <div class="row">
-            <label>深度检索 topK</label><input type="number" id="inDeepTopK" min="1" max="10" value="6" style="width:60px">
-            <label style="margin-left:14px">轻量检索 topK</label><input type="number" id="inLightTopK" min="1" max="5" value="2" style="width:60px">
-            <label style="margin-left:14px">条目去重</label><span class="switch" id="swDedup" onclick="toggleEvokeDedup()"></span>
-          </div>
-          <div class="note" style="margin-top:10px">质量线 = 准入（max(top1×系数, 兜底)）；强相关线 = 弹性升格判定；预算见记忆分配参数。<br>深度 topK = A/C 唤起后 L1/L0 各取候选数；轻量 topK = B 模式候选数；条目去重 = 同一记忆跨轮不重复注入。</div>
-
-          <div class="section-title" style="font-family:var(--mono);font-size:12px;color:var(--acc);border-left:2px solid var(--acc);padding-left:10px;margin:14px 0 8px">板块二 · TDB L0（原始原文）</div>
-          <div class="row">
-            <label>L0 相关性系数</label><input type="number" id="inL0Coef" value="0.93" step="0.01" min="0.5" max="0.99" style="width:70px">
-            <label style="margin-left:14px">L0 相关性兜底</label><input type="number" id="inL0Floor" value="0.52" step="0.01" min="0.3" max="0.8" style="width:70px">
-            <label style="margin-left:14px">L0 最低命中词数</label><input type="number" id="inL0MinHits" value="2" min="1" max="10" style="width:60px">
-          </div>
-          <div class="note" style="margin-top:10px">L0 为大段原始原文：命中词数 ≥ 最低命中词数 → 直接展示（多处匹配即相关，长度无关）；不足则由相关性线兜底。内容 ≤ 板块二上限 → 完整展示；超限不显示，可经板块三命令回查原文。</div>
-
-          <div class="note" style="font-family:var(--mono);font-size:11px;padding:4px 10px;display:inline-block;color:var(--warn);background:rgba(255,184,107,.08);border:1px solid rgba(255,184,107,.25);margin-top:16px">② 主动查询入口</div>
+          <div class="note" style="margin-top:10px">A/B/C 三模式统一走所选模板检索；展示与否由强锚点准入（整段 exact 或 片段 partial）决定，与源预设无关。</div>
 
           <div class="section-title" style="font-family:var(--mono);font-size:12px;color:var(--acc);border-left:2px solid var(--acc);padding-left:10px;margin:14px 0 8px">板块三 · 查询命令（固定内容）</div>
           <div class="mode-sub" style="display:block">
@@ -988,9 +951,9 @@
           <div class="budget-grid">
             <div class="budget-item"><div class="b-name">板块一基线（字符）</div><input type="number" id="inP1Base" value="900" min="100" step="50"></div>
             <div class="budget-item"><div class="b-name">板块一弹性上限（字符）</div><input type="number" id="inP1Max" value="1300" min="100" step="100"></div>
-            <div class="budget-item"><div class="b-name">板块二上限（L0，字符）</div><input type="number" id="inP2Max" value="400" min="100" step="50"></div>
+            <div class="budget-item"><div class="b-name">板块二上限（ov_session，字符）</div><input type="number" id="inP2Max" value="400" min="100" step="50"></div>
           </div>
-          <div class="note" style="margin-top:10px">基础 = 900 + 400；弹性最大 = 1300 + 400。板块二通常不显示，除非相关性达标且内容可整体展示。</div>
+          <div class="note" style="margin-top:10px">基础 = 900 + 400；弹性最大 = 1300 + 400。板块一 900 为上限非下限：强锚点命中装不进 900 时才浮到 1300；板块二 ov_session ≤400 显示、超 400 不显示。</div>
           <div class="row" style="margin-top:14px">
             <button class="btn" onclick="saveEvoke()">保存配置</button>
             <span class="tag" style="color:var(--dim)" id="evokeSaveHint3"></span>
@@ -2350,6 +2313,7 @@ document.querySelectorAll('nav a[data-panel]').forEach((a) => {
     if (a.dataset.panel === 'model') { loadModelPresets(); loadEmbPresets(); loadOvVlm(); loadM0Model(); loadM0Presets(); }
     if (a.dataset.panel === 'wikiimport') wikiLoad();
     if (a.dataset.panel === 'wikiconfig') wikiCfgLoad();
+    if (a.dataset.panel === 'harness') harnessLoad();
     if (a.dataset.panel === 'overview') dsuiLoadOverview();
     if (a.dataset.panel === 'src') dsuiLoadSources();
     if (a.dataset.panel === 'rec') dsuiLoadCfg();
@@ -2573,67 +2537,33 @@ async function loadEvoke() {
     const c = evokeCfg;
     setEvokeBox('A', !!c.modes.A);
     setEvokeBox('B', !!c.modes.B);
-    setEvokeBox('C', !!c.modes.C);
     $('inSignalWords').value = (c.signalWords || []).join(', ');
     $('inCommandWords').value = (c.commandWords || []).join(', ');
-    $('thB').value = c.thresholdB ?? 0.55;
-    $('thBVal').textContent = c.thresholdB ?? 0.55;
-    $('inDeepTopK').value = c.deepTopK ?? 6;
-    $('inLightTopK').value = c.lightTopK ?? 2;
-    $('swDedup').classList.toggle('on', c.dedup !== false);
-    // 阶段5：记忆筛选配置
-    $('inQCoef').value = c.qualityCoef ?? 0.85;
-    $('inQFloor').value = c.qualityFloor ?? 0.48;
-    $('inSCoef').value = c.strongCoef ?? 0.93;
-    $('inSFloor').value = c.strongFloor ?? 0.52;
-    $('inTopK').value = c.topK ?? 10;
-    $('inL0Coef').value = c.l0Coef ?? 0.93;
-    $('inL0Floor').value = c.l0Floor ?? 0.52;
-    $('inL0MinHits').value = c.l0MinHits ?? 2;
+    $('inSourcePreset').value = c.sourcePreset || 'fuzzy_mem0_find';
     $('inCmdText').value = c.cmdText || '请执行下面命令，参数已预填：\n[语义检索] mem0 · query="<你的问题>"\n[记忆检索] /v3/atomic/search · query="<你的问题>"\n[原文检索] /v3/conversation/search · query="<你的问题>"';
-    // 阶段5：记忆分配参数
+    // 记忆分配参数（板块一 900/1300 · 板块二 ov_session 400）
     $('inP1Base').value = c.p1Base ?? 900;
     $('inP1Max').value = c.p1Max ?? 1300;
     $('inP2Max').value = c.p2Max ?? 400;
-    $('evokeSaveHint').textContent = '配置源：#dsh插件 config.json（热生效）';
   } catch (e) { toast('读取唤起配置失败: ' + e.message); }
 }
 
 function toggleEvokeMode(k) {
   if (!evokeCfg) return;
-  evokeCfg.modes = evokeCfg.modes || { A: true, B: true, C: false };
+  evokeCfg.modes = evokeCfg.modes || { A: true, B: false };
   evokeCfg.modes[k] = !evokeCfg.modes[k];
   setEvokeBox(k, evokeCfg.modes[k]);
   $('evokeSaveHint').textContent = '⚠ 未保存';
 }
 
-function toggleEvokeDedup() {
-  if (!evokeCfg) return;
-  evokeCfg.dedup = !evokeCfg.dedup;
-  $('swDedup').classList.toggle('on', evokeCfg.dedup);
-  $('evokeSaveHint').textContent = '⚠ 未保存';
-}
-
 function collectEvokePatch() {
   return {
-    modes: (evokeCfg && evokeCfg.modes) || { A: true, B: true, C: false },
+    modes: (evokeCfg && evokeCfg.modes) || { A: true, B: false },
     signalWords: $('inSignalWords').value.split(/[,，]\s*/).map((s) => s.trim()).filter(Boolean),
     commandWords: $('inCommandWords').value.split(/[,，]\s*/).map((s) => s.trim()).filter(Boolean),
-    thresholdB: Number($('thB').value),
-    deepTopK: Number($('inDeepTopK').value) || 6,
-    lightTopK: Number($('inLightTopK').value) || 2,
-    dedup: !!(evokeCfg && evokeCfg.dedup !== false),
-    // 阶段5：记忆筛选配置
-    qualityCoef: Number($('inQCoef').value) || 0.85,
-    qualityFloor: Number($('inQFloor').value) || 0.48,
-    strongCoef: Number($('inSCoef').value) || 0.93,
-    strongFloor: Number($('inSFloor').value) || 0.52,
-    topK: Number($('inTopK').value) || 10,
-    l0Coef: Number($('inL0Coef').value) || 0.93,
-    l0Floor: Number($('inL0Floor').value) || 0.52,
-    l0MinHits: Number($('inL0MinHits').value) || 2,
+    sourcePreset: $('inSourcePreset').value || 'fuzzy_mem0_find',
     cmdText: $('inCmdText').value,
-    // 阶段5：记忆分配参数
+    // 记忆分配参数（板块一 900/1300 · 板块二 ov_session 400）
     p1Base: Number($('inP1Base').value) || 900,
     p1Max: Number($('inP1Max').value) || 1300,
     p2Max: Number($('inP2Max').value) || 400,
@@ -2643,8 +2573,9 @@ function collectEvokePatch() {
 async function saveEvoke() {
   try {
     const r = await api('/api/evoke', { method: 'POST', body: JSON.stringify({ patch: collectEvokePatch() }) });
+    if (!r || !r.ok) { toast('保存失败: ' + (r && r.reason || '未知错误')); return; }   // 后端返回 ok:false 时如实报错，不显示假成功
     evokeCfg = (r && r.config) || evokeCfg;
-    $('evokeSaveHint').textContent = '✅ 已保存，dsh 插件热生效（无需重启）';
+    $('evokeSaveHint').textContent = '✅ 已保存 → deepsearch config.evoke（热生效）';
     if ($('evokeSaveHint2')) $('evokeSaveHint2').textContent = '✅ 已保存';
     if ($('evokeSaveHint3')) $('evokeSaveHint3').textContent = '✅ 已保存';
   } catch (e) { toast('保存失败: ' + e.message); }
@@ -2656,12 +2587,13 @@ async function testEvoke() {
   $('evokeTestOut').textContent = '测试中…';
   try {
     const r = await api('/api/evoke/test', { method: 'POST', body: JSON.stringify({ text }) });
+    if (!r.ok) { $('evokeTestOut').textContent = '测试失败: ' + (r.reason || '未知'); return; }
     if (!r.hit) {
-      $('evokeTestOut').textContent = `未命中（唤起模式：${r.mode}）——无信号词且语义相关度低于阈值，属正常。`;
+      $('evokeTestOut').textContent = `未命中（唤起模式：${r.mode || '无'}）——无强锚点命中，宁缺毋滥，不注入。`;
       return;
     }
-    // 唤起测试 = 预览真实注入胶囊：直接显示与上下文一致的三板块胶囊原文
-    $('evokeTestOut').textContent = r.block || (r.items || []).map((it) => `[${it.kind}:${it.type || it.role || '?'}] ${it.content}`).join('\n');
+    // 唤起测试 = 预览真实注入胶囊：直接显示与上下文一致的胶囊原文
+    $('evokeTestOut').textContent = r.block || '(空胶囊)';
   } catch (e) { $('evokeTestOut').textContent = '测试失败: ' + e.message; }
 }
 // ═══════════ Wiki 映射面板（阶段1新增，骨架：后端 /api/wiki-map* 就绪后生效） ═══════════

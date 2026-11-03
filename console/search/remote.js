@@ -1,5 +1,5 @@
 /**
- * 远端检索（④：OV 1933 find + mem0 8915 search）
+ * 远端检索（④：OV 1933 find + mem0 search，mem0 端口由 search-api mem0Cfg.baseUrl 决定：6610 新库/8915 旧 TDAI）
  * OV find：POST {ovBaseUrl}/api/v1/search/find，body {query,target_uri,limit,score_threshold}，header X-API-Key。
  * mem0：POST {mem0Url}/search，body {query,limit} → {ok:true,results} | {source}（503 激活中）| {error}（500）。
  */
@@ -49,7 +49,7 @@ export async function mem0Search(mem0Url, { query, limit = 20, timeoutMs = 4000 
   const { status, json } = await postJson(`${mem0Url}/search`, { query, limit }, {}, timeoutMs);
   if (status === 503 && json?.source) return { ok: false, status, source: json.source, results: [] }; // 激活中
   if (!json?.ok) return { ok: false, status, error: json?.error || `HTTP ${status}`, results: [] };
-  // 8915 返回 {ok, items:[{content,score}]}；兼容 results/items 两形态（V6 修复）
+  // mem0 返回 {ok, items:[{content,score}]}；兼容 results/items 两形态（V6 修复）
   const results = (json.results || json.items || []).map((r) => ({
     id: r.id,
     score: typeof r.score === "number" ? r.score : Number(r.score ?? 0),

@@ -89,6 +89,53 @@ def build_plan(rows: list[dict], token_budget: int, limit_batches: int) -> list[
     return plan
 
 
+def _align_rows_to_batch_limit(rows: list[dict], token_budget: int, limit_rows: int) -> list[dict]:
+    """limit_rows 批对齐（对齐 OV ov-import.js _buildPlan 语义）：
+    逐会话按 token 贪心切批 → 只累加【完整批】到 limit_rows（消息总数）上限；
+    不截断批、不跨会话拼接。避免 rows[:N] 消息级硬切把会话切两半。
+    边界（B）：若「第一批都还没装、该会话第一批就 > 剩余额度」→ 照取该整批
+    （不拒绝、不截断、防单会话超 N 永远导入不了的死锁）；后续批超额度则停。
+    limit_rows<=0 表示增量全部，原样返回。
+    """
+    if limit_rows <= 0:
+        return rows
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(row["sessionId"], []).append(row)
+    ordered = sorted(grouped.items(), key=lambda kv: (kv[1][0]["timeMs"], kv[1][0]["id"]))
+    selected: list[dict] = []
+    total = 0
+    for _session_id, messages in ordered:
+        pending: list[dict] = []
+        pending_tokens = 0
+        batches: list[list[dict]] = []
+        for message in messages:
+            message_tokens = estimate_tokens(message["content"])
+            if pending and pending_tokens + message_tokens > token_budget:
+                batches.append(pending)
+                pending, pending_tokens = [], 0
+            pending.append(message)
+            pending_tokens += message_tokens
+            if message_tokens > token_budget:
+                batches.append(pending)
+                pending, pending_tokens = [], 0
+        if pending:
+            batches.append(pending)
+        for batch in batches:
+            count = len(batch)
+            if not selected and total == 0 and count > limit_rows:
+                # 第一批就超 N：照取整批（不拒绝/不截断，防死锁）
+                selected.extend(batch)
+                total += count
+                continue
+            if total + count <= limit_rows:
+                selected.extend(batch)
+                total += count
+            else:
+                return selected  # 后续批会突破 N → 停（整会话/整批留给下次）
+    return selected
+
+
 def _serialize_messages(messages: list[dict]) -> str:
     """等价 Mem0 parse_messages()：把消息列表拼成检索/抽取输入字符串。"""
     return "".join(f"{(m.get('role') or 'user')}: {m.get('content') or ''}\n" for m in messages)
@@ -239,7 +286,44 @@ def now_ms() -> int:
 
 def default_state() -> dict:
     return {"schemaVersion": 2, "sessionCursors": {}, "failedBatches": [], "plannedTotal": 0,
-            "done": 0, "failed": 0, "doneSessions": [], "currentBatch": None, "lastError": None}
+            "done": 0, "failed": 0, "doneSessions": [], "currentBatch": None, "lastError": None,
+            "planSnapshot": []}
+
+
+def _plan_snapshot(ordered: list[dict]) -> list[dict]:
+    """原队列轻量快照：仅留 sessionId/part/messageIds，暂停后 resume 复用，防按 live 重切。"""
+    return [{"sessionId": b["sessionId"], "part": b.get("part", 1),
+             "messageIds": list(b["messageIds"])} for b in ordered]
+
+
+def _batches_from_snapshot(snap: list[dict], source_db: str) -> list[dict]:
+    """由 planSnapshot 重建完整批（按 messageIds 回查 content），保持原队列批组成不变。"""
+    by_id = {}
+    for row in read_synced_rows(source_db, {}):
+        by_id[row["id"]] = row
+    out = []
+    for s in snap:
+        msgs = [by_id[mid] for mid in s["messageIds"] if mid in by_id]
+        if not msgs:
+            continue  # 源已归档删除的批跳过
+        out.append({"sessionId": s["sessionId"], "part": s["part"], "partTotal": s.get("partTotal", s["part"]),
+                    "messages": msgs, "messageIds": list(s["messageIds"]),
+                    "messageCount": len(msgs),
+                    "tokenEstimate": sum(estimate_tokens(r["content"]) for r in msgs)})
+    return out
+
+
+def _row_by_id(row_id: str, source_db: str) -> Optional[dict]:
+    """按 id 查单行（批完成判定用，只读）。"""
+    try:
+        con = sqlite3.connect(f"file:{source_db}?mode=ro", uri=True)
+        try:
+            r = con.execute("SELECT id, time_ms FROM synced WHERE id=?", (row_id,)).fetchone()
+        finally:
+            con.close()
+        return {"id": r[0], "timeMs": int(r[1] or 0)} if r else None
+    except Exception:
+        return None
 
 
 def load_state(state_path: str) -> dict:
@@ -523,23 +607,57 @@ def run_import(*, root: str, source_db: str, config: dict, memory_factory=None, 
     agent_id = config.get("agentId") or os.environ.get("MEM0_AGENT_ID") or "agt-v318rqt0be"
 
     retry_batches = _build_retry_batches(state["failedBatches"], source_db)
-    rows = read_synced_rows(source_db, state["sessionCursors"], until_ms)
-    # 导入数量=消息条数（同 OV 导入 ovImportN 语义）：limit_rows>0 仅取前 N 条消息（按会话 first-message 排序），0=增量全部
-    if limit_rows > 0:
-        rows = rows[:limit_rows]
     retry_ids = {mid for b in retry_batches for mid in b["messageIds"]}
-    new_batches = build_plan([r for r in rows if r["id"] not in retry_ids], token_budget, limit_batches)
+
+    # ── resume 复用原队列：state 有未跑完的 planSnapshot 就沿用它，不按 OV live 重新切批。
+    # 保证「暂停保留原队列 + 继续从作废批续跑」，OV 新增消息/limit_rows 变化都不影响原队列。
+    snap = state.get("planSnapshot") or []
+    cursors = state["sessionCursors"]
+    # 批完成判定：游标只在完整批末条推进，故「批末条 ≤ 该会话游标(timeMs,id)」= 已完成。
+    def _batch_done(s):
+        cur = cursors.get(s["sessionId"])
+        if not cur:
+            return False
+        row = _row_by_id(s["messageIds"][-1], source_db)
+        if not row:
+            return True  # 源已归档删除=视作已处理
+        return (row["timeMs"], str(row["id"])) <= (int(cur["timeMs"]), str(cur["id"]))
+    remaining_snap = [s for s in snap if not _batch_done(s)]
+    if remaining_snap:
+        new_batches = _batches_from_snapshot(remaining_snap, source_db)
+    else:
+        rows = read_synced_rows(source_db, state["sessionCursors"], until_ms)
+        # 导入数量（同 OV ovImportN 语义）：limit_rows>0 限制消息总数但【批对齐】；0=增量全部。
+        if limit_rows > 0:
+            rows = _align_rows_to_batch_limit(rows, token_budget, limit_rows)
+        new_batches = build_plan([r for r in rows if r["id"] not in retry_ids], token_budget, limit_batches)
 
     ordered = retry_batches if failed_only else (retry_batches + new_batches)
+    # 新规划（非 resume）才存快照；resume 沿用旧快照不覆盖（保留原始队列边界）
+    if not remaining_snap and not failed_only:
+        state["planSnapshot"] = _plan_snapshot(new_batches)
 
-    state["plannedTotal"] = len(ordered)
+    # 进度累积（resume 复用原队列）：plannedTotal=原队列全量、done 种子=已完成批数，
+    # 避免每次 run 把 done 归零→进度卡回退。
+    if remaining_snap:
+        state["plannedTotal"] = len(snap)
+        state["done"] = len(snap) - len(remaining_snap)
+    else:
+        state["plannedTotal"] = len(ordered)
+        state["done"] = 0
     # 进度卡单位=批数（同 OV 进度卡"已完成 X 批"）：total 必须=批数而非消息条数。
-    # server.js 候选 state 初始 total 可能=消息条数（limit_rows），此处以批数覆盖为权威值。
-    state["total"] = len(ordered)
-    state["done"] = 0
+    # resume 复用原队列：total=种子+本轮剩余批数=原队列全量，进度卡累积显示（3→12）不回退。
+    state["total"] = state["done"] + len(ordered)
     state["failed"] = 0
-    state["currentBatch"] = None
-    # 规划一完成就落盘：前端进度卡首次显示即读取真实【批数】，不等第一批处理完。
+    # 规划完即预设【第一批】为当前处理：前端进度卡一显示"当前处理"就是 sess·批 1/N，
+    # 而非 null→"—"（否则第1批处理完之前一直显示"—"，用户看到"完成1批后才改样式"）。
+    if ordered:
+        _b0 = ordered[0]
+        state["currentBatch"] = {"sessionId": _b0["sessionId"], "part": _b0["part"],
+                                 "partTotal": _b0.get("partTotal", _b0["part"])}
+    else:
+        state["currentBatch"] = None
+    # 规划一完成就落盘：前端进度卡首次显示即读取真实【批数】+ 当前处理，不等第一批处理完。
     save_state(state_path, state)
 
     memory = memory_factory() if memory_factory is not None else None
@@ -584,13 +702,19 @@ def run_import(*, root: str, source_db: str, config: dict, memory_factory=None, 
             if not interrupted_batch and not batch.get("retry"):
                 last = batch["messages"][-1]
                 state["sessionCursors"][batch["sessionId"]] = {"timeMs": last["timeMs"], "id": last["id"]}
-            state["currentBatch"] = None
+            # 不清 currentBatch：保留本批 session·批 N/M 给前端轮询显示（OV 一致），
+            # 下一批开始会覆盖、run 结束再清。否则批间落盘为 null → 前端"当前处理 —"。
             save_state(state_path, state)
+            # 每批刷 mem0-count.json（coll.count 快照）：导入过程中"记忆总量"实时跳，
+            # 暂停/停止也是已落地记忆的当前值（复用已打开 collection，开销毫秒级，失败不阻塞）。
+            if memory is not None:
+                _write_mem0_count(memory, root)
             if after_attempt is not None:
                 after_attempt(batch, state)
         if interrupted_batch:
             break
 
+    state["currentBatch"] = None  # run 结束清空"当前处理"（进度卡随后隐藏，OV 一致）
     _write_mem0_count(memory, root)
     _finalize(state)
     save_state(state_path, state)
@@ -627,7 +751,8 @@ def main(argv=None):
     if args.dry_run:
         rows = read_synced_rows(source_db, {})
         if args.limit_rows > 0:
-            rows = rows[:args.limit_rows]
+            # dry-run 也用批对齐，与真实导入（run_import）口径一致
+            rows = _align_rows_to_batch_limit(rows, token_budget, args.limit_rows)
         plan = build_plan(rows, token_budget, args.limit_batches)
         print(json.dumps({
             "dryRun": True, "plannedTotal": len(plan), "tokenBudget": token_budget,

@@ -67,3 +67,7 @@ console/search-api.js
 console/llm-wiki-asset/.tmp/
 console/llm-wiki-asset/raw/
 console/llm-wiki-asset/entities/
+
+# Python bytecode cache
+__pycache__/
+*.pyc

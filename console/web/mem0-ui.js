@@ -21,8 +21,9 @@ export function deriveMem0View(status = {}) {
   // OV 前端一致：顶部游标 = 已解析消息总数 / 全库消息总数（消息级，历史累加）
   const resolved = Number(status.resolvedMessages || 0);
   const total = Number(status.totalMessages || 0);
-  // 进度卡显示 = 仅运行/暂停/中断（OV 一致：队列完成即隐藏；失败信息由失败批次卡保留，不驻留进度卡）
-  // 计划尚未落盘时不显示卡片；出现时必已拿到真实批数，避免把消息条数误显示成“批”。
+  // 进度卡显示 = OV 一比一等价（OV index.html:2375-2409：plannedTotal>0 且运行中显示；planned=0/完成后隐藏）。
+  // running||paused||interrupted 已等价 OV 的"运行中"，完成后（三者皆 false）隐藏进度卡、只留失败卡驻留历史。
+  // 真正的根因是直写模式下 importer 覆写丢 running —— 已在 server.js status 派生 running 修好，此处逻辑保持 OV 等价。
   const showProgress = !status.stoppedByUser && planned > 0 && (Boolean(status.running) || Boolean(status.paused) || Boolean(status.interrupted));
   return {
     counts: { planned, done, failed, pending: Math.max(0, planned - done) },
@@ -99,22 +100,53 @@ export function renderMem0Status(status = {}) {
     if (stopBtn) stopBtn.style.display = 'none';
     if (hint) hint.textContent = '';
   }
-  // 失败批次卡：OV 5 列（序号/失败时间/所属会话/重试次数/消息条数），仅 failed 可见，不渲染错误列
+  // 失败批次卡：OV 一比一复刻（index.html:2418-2463）——
+  // ① 同 session#part 多次失败聚合为一行，失败时间多行 <br>；② td 带与 OV 相同的内联样式；
+  // ③ 失败时间格式 YYYY-MM-DD HH:MM:SS。mem0 无 task_id/seq/detached/restored：
+  //    序号列用自增（OV 用 task_id||seq），无状态标注（OV 的 detached/restored 彩标不适用）。
   const fc = document.getElementById('m0FailCard');
   if (fc) fc.classList.toggle('hidden', !view.showFailures);
   const tbody = document.getElementById('m0FailTbody');
   if (tbody) {
-    tbody.textContent = '';
-    let idx = 1;
-    for (const f of view.failures) {
-      const tr = document.createElement('tr');
-      const tdSeq = document.createElement('td'); tdSeq.textContent = idx++;
-      const tdTime = document.createElement('td'); tdTime.textContent = f.failedAt ? new Date(f.failedAt).toLocaleString('zh-CN') : '—';
-      const tdSess = document.createElement('td'); tdSess.textContent = f.sessionId;
-      const tdAtt = document.createElement('td'); tdAtt.textContent = f.attempts || 1;
-      const tdCnt = document.createElement('td'); tdCnt.textContent = f.messageCount || 0;
-      tr.append(tdSeq, tdTime, tdSess, tdAtt, tdCnt);
-      tbody.appendChild(tr);
+    if (!view.failures.length) { tbody.innerHTML = ''; }
+    else {
+      // 按 sessionId#part 聚合（OV index.html:2425-2430）
+      const groups = new Map();
+      for (const f of view.failures) {
+        const key = `${f.sessionId}#${f.part}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(f);
+      }
+      const TD = 'style="padding:11px 10px;border-bottom:1px solid var(--line);font-family:var(--mono)"';
+      let idx = 1;
+      const rows = [];
+      for (const [, recs] of groups) {
+        const recsSorted = recs.slice().sort((a, b) => (a.failedAt || 0) - (b.failedAt || 0));
+        const first = recsSorted[0];
+        // 失败时间：首次 failedAt + 末次 lastAttemptAt（mem0 重试不新增记录、只更新 lastAttemptAt，故两行都列）
+        const fmtTs = (v) => {
+          if (!v) return null;
+          const d = new Date(v);
+          const pad = (x) => String(x).padStart(2, '0');
+          return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+        };
+        const timeSet = [];
+        const tFirst = fmtTs(first.failedAt), tLast = fmtTs(first.lastAttemptAt);
+        if (tFirst) timeSet.push(tFirst);
+        if (tLast && tLast !== tFirst) timeSet.push(tLast);
+        const times = timeSet.length ? timeSet.join('<br>') : '—';
+        // 重试次数：mem0 同批失败是单条记录 attempts 递增（非 OV 每次一条新记录），故读 attempts 字段
+        const attemptsCell = first.attempts || recsSorted.length;
+        rows.push(`<tr>
+          <td ${TD} style="word-break:break-all">${idx}</td>
+          <td ${TD} style="line-height:1.9">${times}</td>
+          <td ${TD} style="word-break:break-all">${escapeHtml(first.sessionId)}</td>
+          <td ${TD}>${attemptsCell}</td>
+          <td ${TD}>${first.messageCount || 0}</td>
+        </tr>`);
+        idx++;
+      }
+      tbody.innerHTML = rows.join('');
     }
   }
   return view;
