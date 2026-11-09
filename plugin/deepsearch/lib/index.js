@@ -10,11 +10,10 @@
  *   - ctx.logger.info/warn 日志；ctx.on/once/provide/effect 生命周期（本插件不额外使用）。
  * 不存在 ctx.registerTool / ctx.registerPanel / ctx.onSessionInit —— 旧假接口已移除。
  */
-import { ApiClient, ApiClientError } from "./api/client.js";
-import { loadConfigFile, consoleBaseUrl, routes } from "./api/routes.js";
+import { ApiClient } from "./api/client.js";
+import { loadConfigFile, routes } from "./api/routes.js";
 import { buildTools } from "./tools.js";
 import { loadAndValidate } from "./prompts/loader.js";
-import { renderSourceCatalog, sourceCatalogFallback } from "./guidance.js";
 import { fileURLToPath } from "node:url";
 const PROMPTS_DIR = fileURLToPath(new URL("../prompts", import.meta.url));
 /** 导引挂载（meow-memory 模式）：systemPrompt.section 一次；服务未就绪时有限重试，失败不影响工具。 */
@@ -34,12 +33,15 @@ function mountGuide(ctx, systemGuide, attempts = 20) {
 // ── agent/pre-step 记忆召回（联动 Console；召回逻辑全在 Console 侧 evokeRecall，插件薄转发）──
 /** 取 decision.messages 最后一条真实 user 消息的纯文本（照 tdai getLastUserText 语义）。 */
 function lastUserText(messages) {
-    if (!Array.isArray(messages)) return "";
+    if (!Array.isArray(messages))
+        return "";
     for (let i = messages.length - 1; i >= 0; i--) {
         const m = messages[i];
-        if (m?.source?.kind !== "user") continue;
+        if (m?.source?.kind !== "user")
+            continue;
         const c = m.content;
-        if (typeof c === "string") return c;
+        if (typeof c === "string")
+            return c;
         if (Array.isArray(c)) {
             return c.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join("\n");
         }
@@ -55,24 +57,30 @@ function lastUserText(messages) {
  * 一律原样放行 decision，绝不阻断对话。
  */
 function mountEvokePrestep(ctx, client) {
-    if (typeof ctx.on !== "function") return;
+    if (typeof ctx.on !== "function")
+        return;
     ctx.on("agent/pre-step", async (payload, next) => {
         let decision;
         try {
             decision = await next();
-        } catch {
+        }
+        catch {
             return undefined;
         }
         try {
-            if (!decision || decision.kind !== "enter" || payload?.signal?.aborted) return decision;
-            if (!Array.isArray(decision.messages) || decision.messages.length === 0) return decision;
-            if (decision.agent?.session?.header?.origin === "subagent") return decision;
+            if (!decision || decision.kind !== "enter" || payload?.signal?.aborted)
+                return decision;
+            if (!Array.isArray(decision.messages) || decision.messages.length === 0)
+                return decision;
+            if (decision.agent?.session?.header?.origin === "subagent")
+                return decision;
             const text = lastUserText(decision.messages);
-            if (!text.trim()) return decision;
+            if (!text.trim())
+                return decision;
             // 薄转发 Console 召回（召回/判定/准入/渲染全在 Console 侧 evokeRecall，插件不重造）
             const base = client.base;
             const ctrl = new AbortController();
-            const t = setTimeout(() => ctrl.abort(), client.timeoutMs ?? 8000);
+            const t = setTimeout(() => ctrl.abort(), client.timeout ?? 8000);
             let r;
             try {
                 const resp = await fetch(routes.evokeRecall(base), {
@@ -82,20 +90,23 @@ function mountEvokePrestep(ctx, client) {
                     signal: ctrl.signal,
                 });
                 r = await resp.json().catch(() => null);
-            } finally {
+            }
+            finally {
                 clearTimeout(t);
             }
             const block = r?.hit ? String(r.block || "") : "";
-            if (!r?.ok || !block.trim()) return decision;
+            if (!r?.ok || !block.trim())
+                return decision;
             // 全新构造独立消息，插到最后一条 user 之前（对齐 meow createUserMessage 形态）
             const lastUser = [...decision.messages].reverse().find((m) => m?.source?.kind === "user");
-            if (lastUser === undefined) return decision;
+            if (lastUser === undefined)
+                return decision;
             const evokeMsg = {
                 id: `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
                 role: "user",
                 content: [{ type: "text", text: block }],
                 source: {
-                    kind: "user",
+                    kind: "deep-search",
                     plugin: "deep-search",
                     form: "snapshot",
                     sections: [{ name: "__meta__", text: JSON.stringify({ kind: "hit", mode: r.mode, query: r.query }) }],
@@ -105,7 +116,8 @@ function mountEvokePrestep(ctx, client) {
             rewritten.splice(rewritten.indexOf(lastUser), 0, evokeMsg);
             ctx.logger?.info?.(`deep-search: evoke mode=${r.mode} query=${JSON.stringify(r.query)} capsule=${block.length}chars injected`);
             return { ...decision, messages: rewritten };
-        } catch (e) {
+        }
+        catch (e) {
             ctx.logger?.warn?.(`deep-search: pre-step evoke 失败（不阻断）: ${e?.message ?? String(e)}`);
             return decision;
         }
@@ -130,23 +142,17 @@ export async function register(ctx) {
         ctx.logger?.warn?.(`deep-search: ${client.guardRejected}（工具调用将返回 GUARD_REJECTED，绝不指向生产）`);
     }
     const prompts = loadAndValidate({ baseDir: PROMPTS_DIR, lang: "zh" });
-    // 5 工具（真实契约：ctx.tools.register(tool)）；deep_search 结果按命中来源附 source-routing 路线指引
-    const tools = buildTools(client, prompts.tools, prompts.sourceRouting);
+    // 12 工具（5 记忆 + 6 网络检索 + 1 route 引导）；guideTexts 附带 __toolsGuide 供被动呈现方法小节、__resultDecision 供执行结果后决策胶囊
+    const webConfig = loadConfigFile() ?? {};
+    const guideTexts = { ...prompts.tools, __toolsGuide: prompts.toolsGuide, __resultDecision: prompts.resultDecision };
+    const tools = buildTools(client, guideTexts, prompts.sourceRouting, prompts.webRouting, webConfig);
     for (const t of tools) {
         ctx.tools.register(t);
     }
-    ctx.logger?.info?.("deep-search: deep_search / deep_search_next / deep_search_read / deep_search_status / deep_search_sync registered");
-    // 检索导引挂载（§ 9.7）：目录块（动态）+ system-guide.md（静态模板）拼进 system prompt。
-    // Console 不可达时只挂回退语，绝不猜测具体 Wiki 资产范围（V37）。
-    let catalogBlock;
-    try {
-        catalogBlock = renderSourceCatalog(await client.sourceCatalog());
-    }
-    catch (e) {
-        catalogBlock = e instanceof ApiClientError ? sourceCatalogFallback() : sourceCatalogFallback();
-    }
-    const systemGuide = `${catalogBlock}\n\n${prompts.systemGuide}`;
-    mountGuide(ctx, systemGuide);
+    ctx.logger?.info?.("deep-search: 5 记忆 + 6 网络检索 + deep_search_guide（三 route 被动引导）registered");
+    // 检索导引挂载（§ 9.7）：system-guide.md 只做 query→route。
+    // deep_search_guide 返回入口方法，目录随后由 deferred context 被动呈现。
+    mountGuide(ctx, prompts.systemGuide);
     // agent/pre-step 记忆召回钩子（联动 Console evokeRecall）：Console 不可达/未命中时静默放行，不影响工具
     mountEvokePrestep(ctx, client);
 }

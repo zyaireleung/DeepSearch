@@ -8,7 +8,7 @@
  *      按导入时间（created_at）由远及近排序，前缀累加未 commit 消息数，
  *      累计 ≤ 导入数量 N（0=全部）；一旦 累计+下一个 > N 则停（下一个留到下轮）。
  *   2. 预切批（事前计算，不是执行时现算）：每个会话按 pending_token_threshold
- *      （估算 token 预算，默认 150000，配置可覆盖）算出每批应归档的条数 → 批数 → 展开成批序列。
+ *      （估算 token 预算，默认 60000，配置可覆盖）算出每批应归档的条数 → 批数 → 展开成批序列。
  *   3. 队列 = 全部批展开：[(会话A,批1),(会话A,批2),…,(会话B,批1),…]，总批数已知。
  *   4. 执行：逐批 commit，keep_recent_count 在 commit 时按实时 live 条数算绝对尾部
  *      （= live − 本批条数）→ OV 归档最老的"live − keep_recent_count"条，
@@ -22,6 +22,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const DEFAULT_STATE = {
   running: false, paused: false, stopping: false, stoppedByUser: false,
@@ -40,7 +42,7 @@ const boundedMs = (value, fallback, min) => {
 };
 
 /** OV HTTP 客户端（user key 访问租户数据 API） */
-class OvClient {
+export class OvClient {
   constructor(baseUrl, apiKey, timeoutMs = 15000) {
     this.base = String(baseUrl || '').replace(/\/+$/, '');
     this.apiKey = apiKey || '';
@@ -109,11 +111,34 @@ class OvClient {
   async messagesBatch(sessionId, messages) {
     return this.post(`/api/v1/sessions/${encodeURIComponent(sessionId)}/messages/batch`, { messages: messages || [] });
   }
+  // ── Gate#2 临时放宽（B-03）：读/写 session config ──
+  // 注意：OV 的 `/{id}/config` 路由【只有 PATCH、没有 GET】（实测 sessions.py L395），读配置必须走
+  // `GET /sessions/{id}`——它返回 effective_auto_commit_policy + effective_memory_extraction_config。
+  async getSessionConfig(sessionId) {
+    const s = await this.get('/api/v1/sessions/' + encodeURIComponent(sessionId));
+    if (!s || s.error) return s;
+    return { auto_commit_policy: s.auto_commit_policy ?? null, memory_extraction_config: s.memory_extraction_config ?? null };
+  }
+  async patchSessionConfig(sessionId, body) {
+    return this._req('PATCH', '/api/v1/sessions/' + encodeURIComponent(sessionId) + '/config', body);
+  }
 }
 
 /** 状态库（SQLite）只读统计：synced 表按 session 分组计数（历史导入总量展示用） */
+// totalMessages 的 COUNT(*) 无过滤 → 必全表扫描（覆盖索引帮不上）。热写大库（726M+）每次请求都扫会拖慢主线程，
+// 故加 120s TTL 缓存：分母是历史累计总量、秒级新鲜度足够，UI 每 5s 轮询期间复用同一快照。
+const OV_TOTAL_TTL_MS = 120_000;
+const _ovTotalCache = new Map(); // dbPath -> { at, value }
 class OvStateDb {
   constructor(dbPath) {
+    // Phase1 重建 state DB 会丢 idx_synced_session → listSessions 的 GROUP BY session_id 退化为全表 SCAN。
+    // 先用一次性可写连接幂等建索引（已存在则 no-op），再开只读连接查询。失败（真只读介质）则降级为纯只读，不阻断。
+    try {
+      const wdb = new DatabaseSync(dbPath);
+      try { wdb.exec("CREATE INDEX IF NOT EXISTS idx_synced_session ON synced(session_id)"); }
+      finally { wdb.close(); }
+    } catch {}
+    this.dbPath = dbPath;
     this.db = new DatabaseSync(dbPath, { readOnly: true });
   }
   close() { try { this.db.close(); } catch {} }
@@ -124,17 +149,46 @@ class OvStateDb {
     return rows.map((r) => ({ session_id: r.session_id, messages: Number(r.messages) }));
   }
   totalMessages() {
+    const now = Date.now();
+    const hit = _ovTotalCache.get(this.dbPath);
+    if (hit && now - hit.at < OV_TOTAL_TTL_MS) return hit.value;
     const row = this.db.prepare(`SELECT COUNT(*) AS c FROM synced`).get();
-    return Number(row?.c || 0);
+    const value = Number(row?.c || 0);
+    _ovTotalCache.set(this.dbPath, { at: now, value });
+    return value;
   }
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** OV 终态语义：终态归状态的主人（OvImport），不依赖 timeline 展示形状。
+ *  abort=true → 用户停止；无失败批 → completed；有成功也有失败 → partial-completed；全失败 → failed。 */
+export function deriveOvOutcome(state, abort) {
+  if (abort) return 'stopped';
+  const failed = (state.failedBatches || []).length || state.failed || 0;
+  const done = state.done || 0;
+  if (failed === 0) return 'completed';
+  if (done > 0) return 'partial-completed';
+  return 'failed';
+}
+
+/** 领域事件：不含任何 UI/timeline 形状，可被 CLI/测试/未来其它消费端复用。 */
+export function ovFinishEvent(state, abort) {
+  return {
+    kind: 'import-finished',
+    source: 'ov',
+    outcome: deriveOvOutcome(state, abort),
+    done: state.done || 0,
+    plannedTotal: state.plannedTotal || 0,
+    failed: state.failed || 0,
+  };
+}
+
 export class OvImport {
   constructor(opts) {
     this.opts = opts;
     this.log = opts.log || ((...a) => console.log('[ov-import]', ...a));
+    this.onEvent = opts.onEvent || null;   // 领域事件订阅者（server 据此写 timeline；不认识展示形状）
     this.state = structuredClone(DEFAULT_STATE);
     this.progress = {};
     this.done = [];            // 已完成（所有批都跑完）的 session_id
@@ -161,6 +215,12 @@ export class OvImport {
   _loadConfig() {
     try { return JSON.parse(fs.readFileSync(this.opts.configFile, 'utf8')).ovImport || {}; }
     catch { return {}; }
+  }
+  _updateCommitKeepRecent() {
+    const raw = this.config?.updateCommitKeepRecent;
+    if (raw === undefined || raw === null || raw === '') return 20;
+    const n = Number(raw);
+    return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 20;
   }
   _loadState() {
     try { this.state = { ...structuredClone(DEFAULT_STATE), ...JSON.parse(fs.readFileSync(this.opts.stateFile, 'utf8')) }; } catch {}
@@ -253,6 +313,10 @@ export class OvImport {
         startAt: this.config.startAt || '', intervalMin: this.config.intervalMin || 720,
         importN: this.config.importN || 0,
         pendingTokenBudget: this.config.pendingTokenBudget || 60000,
+        // 更新 commit（session 已 commit 过、本轮有新消息）保留的最近尾巴条数。
+        // 首次 commit 不留尾巴（keepRecent=0 整会话归档完）；更新 commit 留 N 条活跃尾巴不归档，
+        // 避免"每轮把最新消息也归档→频繁小批"（见 _splitBatches keepTailCount）。
+        updateCommitKeepRecent: this._updateCommitKeepRecent(),
       },
     };
   }
@@ -294,23 +358,64 @@ export class OvImport {
     if (ascii) return Math.floor((text.length + 3) / 4);
     return Math.floor((units.reduce((a, b) => a + b, 0) + 3) / 4);
   }
-  _msgTokens(m) {
-    const texts = [];
-    for (const p of (m.parts || [])) {
-      const t = p.type;
-      if (t === 'text') texts.push(p.text || '');
-      else if (t === 'context') texts.push(p.abstract || '');
-      else if (t === 'tool') {
-        if (p.tool_id) texts.push(p.tool_id);
-        if (p.tool_name) texts.push(p.tool_name);
-        if (p.tool_input != null) texts.push(JSON.stringify(p.tool_input));
-        if (p.tool_output != null) texts.push(String(p.tool_output));
-      }
-    }
-    return this._estimateTextTokens(texts.join(''));
+
+  // ── Gate#2 临时放宽（B-03，约简版）：read → patch → commit(fn) → finally restore ──
+  // 仅操作 auto_commit_policy（实测 legal 字段：pending_token_threshold / message_count_threshold /
+  // idle_timeout_seconds / keep_recent_count / min_commit_interval_seconds，extra=forbid）。
+  // 不碰 enabled / token_count_threshold / memory_extraction_config.pending_token_threshold
+  // —— 这些字段真实 OV 一律 400 extra_forbidden（沙盒 1934 实测）。
+  // 原值两种形态：完整对象 → 原样还原；null → 还原 null（= 关闭自动 commit，实测 200）。
+  // 无需字段存在性探测 / 字段级删除能力 / 三态恢复。
+  _gate2CanClearField() {
+    return this.config?.gate2CanClearField === true;   // 兼容既有测试；主路径不再依赖
   }
 
-  /** 读会话 live messages.jsonl → 逐条估算 token */
+  async _withTempThreshold(sessionId, threshold, fn) {
+    // 1) read 原值（整对象或 null，整体保存）
+    const cfg = await this.ov.getSessionConfig(sessionId);
+    if (!cfg || cfg.error) throw new Error('gate2_read_failed');
+    const origPolicy = cfg.auto_commit_policy ?? null;   // 完整对象 或 null
+    // 2) patch：只写 auto_commit_policy 的 legal 字段，全部顶到合法最大值
+    const tempPolicy = {
+      pending_token_threshold: threshold,                                   // 999999 ≤ MAX 1000000
+      message_count_threshold: 1000,                                        // = MAX
+      idle_timeout_seconds: 604800,                                         // = MAX（7 天）
+      keep_recent_count: Number(origPolicy?.keep_recent_count) || 0,        // 保留原值
+      min_commit_interval_seconds: Number(origPolicy?.min_commit_interval_seconds) || 0,
+    };
+    let patched;
+    try {
+      patched = await this.ov.patchSessionConfig(sessionId, { auto_commit_policy: tempPolicy });
+    } catch (e) {
+      this._log?.('warn', '[ov-import] gate2 patch 抛错: ' + (e?.message || e));
+      throw new Error('gate2_patch_failed');
+    }
+    if (!patched || patched.error) throw new Error('gate2_patch_failed');
+    let gate2Restored = false;
+    try {
+      const out = await fn();
+      gate2Restored = true;
+      return out;
+    } finally {
+      // 无条件 restore：fn 成功 / 抛错都走这里（这是 v4 的核心缺陷修复——v4 在 fn 抛错时直接进入
+      // finally 只记日志、不 restore，临时放宽阈值会永久残留）。
+      try {
+        await this.ov.patchSessionConfig(sessionId, { auto_commit_policy: origPolicy });
+        gate2Restored = true;
+      } catch (e) {
+        gate2Restored = false;
+        this._log?.('warn', '[ov-import] gate2 restore failed: ' + (e?.message || e));
+      }
+      if (!gate2Restored) {
+        // restore 失败必须抛错中止队列（_runLoop catch gate2_restore_failed → break），
+        // 绝不带残留放宽阈值继续下一批。注意：若 fn 也抛错，此处 throw 会取代 fn 的错误向上传播。
+        this._log?.('error', '[ov-import] gate2 restore 未确认，session config 可能残留放宽阈值，抛 gate2_restore_failed 中止队列');
+        throw new Error('gate2_restore_failed');
+      }
+    }
+  }
+
+  /** 读会话 live messages.jsonl → 逐条估算 token（只用于切批预算，口径不追求精确） */
   _readLiveMessages(sessionId) {
     const filePath = path.join(this.sessionsDir, sessionId, 'messages.jsonl');
     const text = fs.readFileSync(filePath, 'utf8');
@@ -320,7 +425,8 @@ export class OvImport {
       if (!l) continue;
       try {
         const m = JSON.parse(l);
-        out.push({ tokens: this._msgTokens(m) });
+        const body = (m.parts || []).map((p) => p.text || p.abstract || p.tool_output || '').join('\n');
+        out.push({ tokens: this._estimateTextTokens(body) });
       } catch {}
     }
     return out;
@@ -351,46 +457,34 @@ export class OvImport {
   }
 
   /**
-   * 会话内【贪心切批】：
-   * 读 live messages.jsonl → 逐条估算 token → 按预算（pending_token_budget，估算口径）顺序累加，
-   * 到预算切一批；单条超预算单独一批（不切断消息）。与 OV plan_extraction_batches 同行为、同口径。
+   * 会话内贪心切批：读 live messages.jsonl → 逐条 CJK 估算 token → 按预算累加，到预算切一批；
+   * 单条超预算自成一批（console 不切断消息内容，超大单条交给 OV 自行处理）。
+   * ponytail: 砍掉 twoTier/EMA/tokenizer 桥——console 切批只是粗预算，OV 1933 有自己的
+   * plan_extraction_batches 会按 pending_token_threshold 自行重切，这边算得再精也没用。
    */
-  async _splitBatches(sessionId) {
-    let messages;
-    try {
-      messages = this._readLiveMessages(sessionId);
-    } catch (e) {
-      throw new Error(`读取会话消息失败 ${sessionId}: ${e?.message || e}（sessionsDir=${this.sessionsDir}）`);
-    }
-    if (!messages.length) return [];
+  async _splitBatches(sessionId, keepTailCount = 0) {
+    const tail = Math.max(0, Number(keepTailCount) || 0);
+    const all = this._readLiveMessages(sessionId);
+    const msgs = tail > 0 ? all.slice(0, Math.max(0, all.length - tail)) : all;
+    if (!msgs.length) return [];
     const budget = this.config.pendingTokenBudget || 60000;
-
     const batches = [];
-    let currentSize = 0, currentTokens = 0, remaining = messages.length;
-    for (const m of messages) {
-      const t = m.tokens;
-      // 单条超预算：先 flush 当前批，再单独成批（不切断）
-      if (t > budget) {
-        if (currentSize > 0) {
-          batches.push(this._makeBatch(sessionId, batches.length + 1, currentSize, remaining));
-          remaining -= currentSize;
-          currentSize = 0; currentTokens = 0;
-        }
+    let size = 0, toks = 0, remaining = msgs.length + tail;
+    const flush = () => {
+      batches.push(this._makeBatch(sessionId, batches.length + 1, size, remaining));
+      remaining -= size; size = 0; toks = 0;
+    };
+    for (const m of msgs) {
+      if (m.tokens > budget) {            // 超大单条自成一批
+        if (size > 0) flush();
         batches.push(this._makeBatch(sessionId, batches.length + 1, 1, remaining));
         remaining -= 1;
         continue;
       }
-      if (currentSize > 0 && currentTokens + t > budget) {
-        batches.push(this._makeBatch(sessionId, batches.length + 1, currentSize, remaining));
-        remaining -= currentSize;
-        currentSize = 0; currentTokens = 0;
-      }
-      currentSize += 1;
-      currentTokens += t;
+      if (size > 0 && toks + m.tokens > budget) flush();
+      size += 1; toks += m.tokens;
     }
-    if (currentSize > 0) {
-      batches.push(this._makeBatch(sessionId, batches.length + 1, currentSize, remaining));
-    }
+    if (size > 0) flush();
     const total = batches.length;
     for (const b of batches) b.partTotal = total;
     return batches;
@@ -405,15 +499,23 @@ export class OvImport {
     const list = await this.ov.listSessions();
     const metas = await this._fetchMetas(list.map((s) => s.session_id));
     const pending = metas
-      .filter((m) => (m.message_count || 0) > 0)
-      .sort((a, b) => this._planSort(a, b));   // 失败优先 + 时间由远及近
+      .filter((m) => (m.message_count || 0) > 0);
+    // 排序键改用会话首条消息的真实时间（不受 --once 灌入污染的 session.created_at）：
+    // 只对 pending（live>0）会话读文件取首条时间，避免对已 commit 会话做无谓 IO。
+    for (const m of pending) m.first_message_at = this._firstMessageAt(m.session_id) || m.created_at || '';
+    pending.sort((a, b) => this._planSort(a, b));   // 失败优先 + 首条消息真实时间由远及近
 
     const n = Number(importN) || 0;
+    const keepRecentN = this._updateCommitKeepRecent();
     const plan = [];
     let selectedMessages = 0;
     for (const s of pending) {
+      // A/B 分流：首次 commit（commit_count=0）整会话归档完（keepTail=0）；
+      // 更新 commit（已 commit 过、本轮有新消息）保留最近 N 条活跃尾巴（keepTail=N）。
+      const isFirstCommit = (Number(s.commit_count) || 0) === 0;
+      const keepTail = isFirstCommit ? 0 : keepRecentN;
       let batches;
-      try { batches = await this._splitBatches(s.session_id); }
+      try { batches = await this._splitBatches(s.session_id, keepTail); }
       catch (e) {
         this.log('切批失败，跳过该会话', s.session_id, e?.message || e);
         continue;
@@ -457,7 +559,55 @@ export class OvImport {
     };
     const ra = rank(a), rb = rank(b);
     if (ra !== rb) return ra - rb;
-    return new Date(a.created_at) - new Date(b.created_at);
+    // 时间 tiebreak 用首条消息真实时间（_buildPlan 已附加 first_message_at），
+    // 回落 created_at 兜底（无消息时间的空/task 会话）。修 --once 把 session.created_at
+    // 污染成字母序导致"由远及近"退化的历史问题。
+    return new Date(a.first_message_at || a.created_at) - new Date(b.first_message_at || b.created_at);
+  }
+
+  /**
+   * 取会话首条消息的真实时间（读 live + history/archive 各文件首行 created_at，取最早）。
+   * 依据：OV 每条消息的 created_at 是真实时间（ingest 写入时携带），未被 --once 灌入污染；
+   * 而 session 级 created_at 被 --once 覆盖成灌入时刻（字母序），不能用作"由远及近"排序键。
+   * 分块读取直到首个换行，兼容首条 JSON 超过 2KB；读不到返回 ''（调用方回落 created_at）。
+   */
+  _firstMessageAt(sessionId) {
+    if (!this.sessionsDir) return '';
+    const dir = path.join(this.sessionsDir, sessionId);
+    const files = [];
+    const live = path.join(dir, 'messages.jsonl');
+    if (fs.existsSync(live)) files.push(live);
+    const hist = path.join(dir, 'history');
+    if (fs.existsSync(hist)) {
+      try {
+        for (const e of fs.readdirSync(hist)) files.push(path.join(hist, e, 'messages.jsonl'));
+      } catch {}
+    }
+    let best = '';
+    for (const f of files) {
+      try {
+        if (!fs.existsSync(f)) continue;
+        const fd = fs.openSync(f, 'r');
+        const chunks = [];
+        let position = 0;
+        try {
+          while (true) {
+            const buf = Buffer.alloc(8192);
+            const n = fs.readSync(fd, buf, 0, buf.length, position);
+            if (!n) break;
+            const lineEnd = buf.subarray(0, n).indexOf(0x0A);
+            chunks.push(buf.subarray(0, lineEnd >= 0 ? lineEnd : n));
+            if (lineEnd >= 0) break;
+            position += n;
+          }
+        } finally { fs.closeSync(fd); }
+        const firstLine = Buffer.concat(chunks).toString('utf8');
+        if (!firstLine.trim()) continue;
+        const ts = JSON.parse(firstLine)?.created_at || '';
+        if (ts && (!best || ts < best)) best = ts;
+      } catch {}
+    }
+    return best;
   }
 
   /**
@@ -795,48 +945,71 @@ export class OvImport {
         // OV 归档"最老的 live − keep_recent_count 条"，于是归档条数恒等于本批计划条数，
         // 上一批被跳过/提前归档/外部补回消息都不会把两批合并成一个归档。
         const keepRecent = this._absKeepRecent(b, b.keepRecent);
-        const r = await this.ov.commit(b.session_id, keepRecent);
-        const taskId = r?.task_id || '';
-        const archiveUri = r?.archive_uri || '';
+        let wr = null;                                     // _waitTask 结果（true/false/'disconnected'），原样沿用后续记账分支
+        let doneTaskId = '';                               // 本批成功 commit 的 task_id（记账用）
+        let gate2Err = null;
+        try {
+          // Gate#2 临时放宽 → commit → 唯一 _waitTask
+          await this._withTempThreshold(b.session_id, 999999, async () => {
+            const r = await this.ov.commit(b.session_id, keepRecent);
+            const taskId = r?.task_id || '';
+            const archiveUri = r?.archive_uri || '';
+            if (taskId) {
+              this._currentTaskId = taskId;
+              doneTaskId = taskId;
+              // archiveUri = commit 响应的本次归档目录：任务失败时记入失败记录，下轮恢复精确定位。
+              wr = await this._waitTask(taskId, b, i + 1, archiveUri);   // ← 全仓唯一 _waitTask
+              this._currentTaskId = '';
+              this.state.taskWaitStartedAt = 0;
+              this.state.taskWaitSeconds = 0;
+              this.state.taskLastStatus = '';
+            }
+          });
+        } catch (e) {
+          if (String(e?.message || e).includes('gate2_patch_failed') ||
+              String(e?.message || e).includes('gate2_restore_failed')) {
+            gate2Err = String(e?.message || e);
+          } else {
+            throw e;                                                   // 非 Gate#2 错误原样上抛，走既有失败记账
+          }
+        }
+        if (gate2Err) {
+          // N-03/R-02：Gate#2 patch/restore 失败 → 记失败并中止后续批次，不继续污染其它 session。
+          // restore 失败意味着 session config 可能仍处于放宽态，绝不能继续下一批（会再次 patch 且污染面扩大）。
+          this.state.lastError = 'OV Gate#2 ' + gate2Err + '，队列已中止（配置可能未恢复，请人工核查 session config）';
+          this.state.paused = true;
+          this._saveState();
+          this.progress[`${b.session_id}#${b.part}`] = 'done';
+          this._saveProgress();
+          break;
+        }
         let ok = true;
         let skipMark = false;   // 断开批次由 _syncDetached 记账，本层不再记
-        if (taskId) {
-          this._currentTaskId = taskId;
-          // archiveUri = commit 响应的本次归档目录：任务失败时记入失败记录，
-          // 下轮恢复用精确定位 failed archive（勿靠 mtime 猜）。
-          const wr = await this._waitTask(taskId, b, i + 1, archiveUri);
-          this._currentTaskId = '';
-          this.state.taskWaitStartedAt = 0;
-          this.state.taskWaitSeconds = 0;
-          this.state.taskLastStatus = '';
-          if (wr === 'disconnected') {
-            // 队列层断开（网络断/停滞/总超时）：_waitTask 已写 detached 记录。
-            // 暂停队列等 OV 恢复，resume() 做 _syncDetached 重新定性本批。
-            this.state.paused = true;
-            this.state.lastError = 'OV 连接中断，队列已暂停（点继续获取 OV 状态）';
-            this._saveState();
-            // 等待用户"继续"（resume 已 _syncDetached）；期间可停止。
-            while (this.state.paused && !this._abort) { await sleep(2000); }
-            if (this._abort) { await this._finalizeAbort(); break; }
-            // 继续后：本批已由 _syncDetached 定性并记账（completed→_markBatchDone 已做 /
-            // failed→不记账留恢复 / unknown→live 重发）。这里不再记账，避免重复 doneParts。
-            const det = (this.state.failedBatches || []).filter((x) => x.session_id === b.session_id && x.part === b.part).pop();
-            if (det?.status === 'failed') ok = false;
-            this.log('断开批次重新定性', b.session_id, '#', b.part, det?.status || 'none');
-            skipMark = true;
-          } else {
-            ok = wr === true;
-          }
+        if (wr === 'disconnected') {
+          // 队列层断开（网络断/停滞/总超时）：_waitTask 已写 detached 记录。
+          // 暂停队列等 OV 恢复，resume() 做 _syncDetached 重新定性本批。
+          this.state.paused = true;
+          this.state.lastError = 'OV 连接中断，队列已暂停（点继续获取 OV 状态）';
+          this._saveState();
+          // 等待用户"继续"（resume 已 _syncDetached）；期间可停止。
+          while (this.state.paused && !this._abort) { await sleep(2000); }
+          if (this._abort) { await this._finalizeAbort(); break; }
+          // 继续后：本批已由 _syncDetached 定性并记账（completed→_markBatchDone 已做 /
+          // failed→不记账留恢复 / unknown→live 重发）。这里不再记账，避免重复 doneParts。
+          const det = (this.state.failedBatches || []).filter((x) => x.session_id === b.session_id && x.part === b.part).pop();
+          if (det?.status === 'failed') ok = false;
+          this.log('断开批次重新定性', b.session_id, '#', b.part, det?.status || 'none');
+          skipMark = true;
         } else {
-          this.log('commit 未返回 task（空归档？）', b.session_id, '#', b.part);
+          ok = wr === true;
         }
         // 当前批正常完成就记账（即使已 stop —— stop 只停后续批，不丢当前批）；
         // task 失败/取消（ok=false）不记账，留给下次导入自动优先重试（含归档恢复）；
         // 断开批次（skipMark）由 _syncDetached 定性记账，本层跳过避免重复。
-        if (ok && taskId && !skipMark) {
+        if (ok && wr === true && !skipMark) {
           // 记录本会话最近一次成功 commit 的 task_id（会话级重试成功时回填 resolvedTaskId）
           this._lastTaskBySession = this._lastTaskBySession || {};
-          this._lastTaskBySession[b.session_id] = taskId;
+          if (doneTaskId) this._lastTaskBySession[b.session_id] = doneTaskId;
           this._markBatchDone(b);
         }
       } catch (e) {
@@ -890,6 +1063,8 @@ export class OvImport {
     this.state.taskWaitSeconds = 0;
     this.state.taskLastStatus = '';
     this._saveState();
+    // 导入终态：发领域事件（不含 timeline 形状），订阅者（server）自行翻译成展示事件。
+    if (this.onEvent) { try { this.onEvent(ovFinishEvent(this.state, this._abort)); } catch (e) { this.log('onEvent 回调异常', e?.message || e); } }
   }
 
   _markBatchDone(b) {

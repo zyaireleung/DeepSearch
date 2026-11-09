@@ -12,6 +12,16 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const p = () => process.env.WIKI_ASSETS_FILE || path.join(__dirname, '..', '.dsh', 'wiki-assets.json');
 
+// ── 生命周期观察者：lib 不反向依赖 server，跨层通知只走回调注册 ──
+let wikiListeners = [];
+/** 注册 Wiki 生命周期监听器（server 启动时订阅写 timeline jsonl）。 */
+export function onWikiEvent(fn) { wikiListeners.push(fn); }
+/** 各变更点调用：action ∈ add/delete/enable/disable/update/ready/assetize-done/... */
+function emitWiki(e) {
+  const ev = { ts: new Date().toISOString(), ...e };
+  for (const fn of wikiListeners) { try { fn(ev); } catch {} }
+}
+
 export function loadAssets() {
   try { return JSON.parse(fs.readFileSync(p(), 'utf8')); } catch { return { assets: [] }; }
 }
@@ -78,6 +88,7 @@ export function updateAssetDescription(id, payload) {
   asset.code = code;
   asset.description = description;
   saveAssets(d);
+  emitWiki({ action: 'update', id, name: asset.name });
   return { ok: true, asset: withMeta(asset) };
 }
 
@@ -99,7 +110,9 @@ export function registerAsset({ id, name, path: assetPath, enabled = true, state
   const asset = { id, name, path: assetPath, enabled, state, registeredAt: new Date().toISOString(), lastUpdate: null, lastStatus: null };
   if (finalCode != null) asset.code = finalCode;
   asset.description = typeof description === 'string' ? description.trim() : EMPTY_DESCRIPTION;
-  d.assets.push(asset); saveAssets(d); return { ok: true, asset: withMeta(asset) };
+  d.assets.push(asset); saveAssets(d);
+  emitWiki({ action: 'add', id, name, state });
+  return { ok: true, asset: withMeta(asset) };
 }
 
 /** 新建任务确认后立即写入注册表，以便导入/配置两页同步显示“新建中”。 */
@@ -110,7 +123,9 @@ export function registerPendingAsset({ id, name, path: assetPath, code, descript
 export function setAssetState(id, state) {
   const d = loadAssets(); const a = d.assets.find(x => x.id === id);
   if (!a) return { ok: false, reason: 'not found' };
-  a.state = state; saveAssets(d); return { ok: true, asset: a };
+  a.state = state; saveAssets(d);
+  emitWiki({ action: state, id, name: a.name, state });
+  return { ok: true, asset: a };
 }
 
 /** 更新任务终态独立写回资产摘要，供列表/定时任务用户界面读取。 */
@@ -125,16 +140,21 @@ export function recordAssetUpdate(id, { status, at = new Date().toISOString() } 
 
 export function unregisterAsset(id) {
   const d = loadAssets(); const n = d.assets.length;
+  const gone = d.assets.find(x => x.id === id);   // 先取 name（删除事件标题用），再删
   d.assets = d.assets.filter(a => a.id !== id);
   if (d.assets.length === n) return { ok: false, reason: 'not found' };
-  saveAssets(d); return { ok: true };
+  saveAssets(d);
+  emitWiki({ action: 'delete', id, name: gone ? gone.name : id });
+  return { ok: true };
 }
 
 export function setAssetEnabled(id, enabled) {
   const d = loadAssets(); const a = d.assets.find(x => x.id === id);
   if (!a) return { ok: false, reason: 'not found' };
   if (a.state && a.state !== 'ready') return { ok: false, reason: '资产新建中，完成后才可开关' };
-  a.enabled = !!enabled; saveAssets(d); return { ok: true, asset: a };
+  a.enabled = !!enabled; saveAssets(d);
+  emitWiki({ action: enabled ? 'enable' : 'disable', id, name: a.name });
+  return { ok: true, asset: a };
 }
 
 export function _reset() { fs.rmSync(p(), { force: true }); }

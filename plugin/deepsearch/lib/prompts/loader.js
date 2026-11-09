@@ -10,7 +10,7 @@
  *   - 注释：`#` 开头行；分隔：`---` 行（均忽略）
  *   - 首行 YAML frontmatter（`---` 包围）被跳过
  *
- * system-guide.md 是整段文档槽位（三段导引），按原始文本读取，不做 key-value 解析。
+ * system-guide.md 是整段文档槽位（检索分层指针），按原始文本读取，不做 key-value 解析。
  */
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -90,11 +90,14 @@ export function readSlotMerged(name, opts) {
     }
     return merged;
 }
-/** 加载全部槽位：system-guide/source-routing 原样文本（整段文档，覆盖即替换），其余按键合并 */
+/** 加载全部槽位：system-guide/tools-guide/source-routing/web-routing/result-decision 原样文本（整段文档，覆盖即替换），其余按键合并 */
 export function loadSlots(opts) {
     return {
         systemGuide: readSlotText("system-guide", opts),
+        toolsGuide: readSlotText("tools-guide", opts),
         sourceRouting: readSlotText("source-routing", opts),
+        webRouting: readSlotText("web-routing", opts),
+        resultDecision: readSlotText("result-decision", opts),
         tools: readSlotMerged("tools", opts),
         labels: readSlotMerged("labels", opts),
         notices: readSlotMerged("notices", opts),
@@ -156,6 +159,52 @@ export const TOOL_KEYS = [
     "deep_search_read.param.id",
     "deep_search_read.param.source",
     "deep_search_read.out.read",
+    // deep_search_web（网络检索）
+    "deep_search_web.description",
+    "deep_search_web.param.run_id",
+    "deep_search_web.param.question",
+    "deep_search_web.param.intent",
+    "deep_search_web.param.claims",
+    "deep_search_web.out.state",
+    "deep_search_web.out.next_pending_claim",
+    // deep_search_step（网络检索）
+    "deep_search_step.description",
+    "deep_search_step.param.run_id",
+    "deep_search_step.out.state",
+    "deep_search_step.out.evidence_added",
+    "deep_search_step.out.next_pending_claim",
+    "deep_search_step.out.diagnostics",
+    // deep_search_reflect（网络检索）
+    "deep_search_reflect.description",
+    "deep_search_reflect.param.run_id",
+    "deep_search_reflect.param.decisions",
+    "deep_search_reflect.param.new_claims",
+    "deep_search_reflect.out.should_stop",
+    "deep_search_reflect.out.state",
+    // deep_search_report（网络检索）
+    "deep_search_report.description",
+    "deep_search_report.param.run_id",
+    "deep_search_report.out.markdown",
+    // deep_search_crawl（网络检索单发）
+    "deep_search_crawl.description",
+    "deep_search_crawl.param.platform",
+    "deep_search_crawl.param.type",
+    "deep_search_crawl.param.creator_id",
+    "deep_search_crawl.param.specified_id",
+    "deep_search_crawl.param.keywords",
+    "deep_search_crawl.out.raw_records",
+    "deep_search_crawl.out.new_files",
+    "deep_search_crawl.out.count",
+    // deep_search_guide（query route → 入口工具方法；目录由 deferred context 呈现）
+    "deep_search_guide.description",
+    "deep_search_guide.param.route",
+    "deep_search_guide.param.include_fanout",
+    "deep_search_guide.out.result",
+    // deep_search_fanout（path-1 并行编排：web 多站点真并行 + crawl 平台串行队列）
+    "deep_search_fanout.description",
+    "deep_search_fanout.param.branches",
+    "deep_search_fanout.out.branches",
+    "deep_search_fanout.out.summary",
 ];
 /** 文案引用键集合（labels/notices 必须满足；V25 决策注册表双向闭合） */
 export const LABEL_KEYS = [

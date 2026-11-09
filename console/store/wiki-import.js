@@ -7,6 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { quantizeInt8 } from "../search/embed.js";
+import { markSynced } from "./last-sync.js";
 
 export function importWikiAsset(db, asset, assetDir) {
   const vecPath = path.join(assetDir, ".vectors.json");
@@ -159,8 +160,12 @@ export function importAllWiki(db, mounted, { force = false } = {}) {
     const navN = populateWikiNav(db, a, a.path); // 8.8 四层深挖链（wiki_nav）
     const existing = db.prepare("SELECT COUNT(*) AS n FROM wiki_blocks WHERE asset_id=?").get(a.id).n;
     if (existing > 0 && !force) { results.push({ assetId: a.id, imported: 0, toc: tocN, nav: navN, note: `skip(existing=${existing})` }); continue; }
-    results.push({ ...importWikiAsset(db, a, a.path), toc: tocN, nav: navN });
+    const r = importWikiAsset(db, a, a.path);
+    results.push({ ...r, toc: tocN, nav: navN });
   }
+  // 有掛載資產且同步循環成功完成（未拋錯）→ **只有實際導入了 blocks（總表真的變了）才標記**「上次同步時間」。
+  // 純重啟（已存在 skip、imported=0）不 mark——對齊「源變化+寫總表成功才推時間」，避免啟動旁路誤推。
+  if (mounted.length && results.some(r => (r.imported || 0) > 0)) markSynced(db, "wiki");
   return results;
 }
 
@@ -180,5 +185,8 @@ export function syncWiki(db, mounted, { force = false } = {}) {
     const navN = populateWikiNav(db, a, a.path); // 8.8 四层深挖链
     results.push({ assetId: a.id, imported: res.imported, removed, toc: tocN, nav: navN, note: `blocks=${keys.length}` });
   }
+  // 同步寫總表完成 → **只有真實導入/刪除（總表真的變了）才標記**「上次同步時間」。
+  // 純對賬 0 塊變化（源沒變、冪等重跑）不 mark，避免鏡像調度器把「總表回寫」誤當「源變化」而自觸發。
+  if (mounted.length && results.some(r => (r.imported || 0) > 0 || (r.removed || 0) > 0)) markSynced(db, "wiki");
   return results;
 }

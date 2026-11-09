@@ -333,7 +333,7 @@
   .copy{color:var(--acc);cursor:pointer;margin-left:5px}
   .notice{color:var(--dim);font-family:var(--mono);font-size:11px;margin-left:4px}
   .table-wrap{border:1px solid var(--line);border-radius:3px;overflow:hidden}
-  .tbl td .desc{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0;width:100%}
+  .tbl td .desc{color:var(--text);font-size:12px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:1;overflow:hidden;word-break:break-all;cursor:help}
   .tbl td .words{font-family:var(--mono);font-size:12px;color:var(--acc);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
   /* ── LLM WIKI 板块（Wiki 导入 / Wiki 配置）── */
@@ -457,6 +457,67 @@
   .dsui .note{color:var(--dim);font-size:12px;background:var(--panel2);border:1px solid var(--line);border-radius:2px;padding:9px 13px;margin-top:10px}.dsui .note b{color:var(--warn);font-weight:600}
   @media(max-width:900px){.dsui .dsui-grid{grid-template-columns:repeat(2,1fr)}}
   @media(max-width:620px){.dsui .dsui-grid{grid-template-columns:1fr}}
+
+  /* ── 事件记录时间线（移植 logs-preview-timeline-v3，复用现有 :root 变量）── */
+  .timeline{position:relative;padding-left:120px}
+  .timeline::before{content:"";position:absolute;left:100px;top:0;bottom:0;width:2px;background:var(--line)}
+  .tl-item{position:relative;margin-bottom:14px}
+  .tl-time{position:absolute;left:-120px;top:0;width:90px;text-align:right;font-family:var(--mono);font-size:11px;color:var(--dim);line-height:1.5}
+  .tl-dot{position:absolute;left:-26px;top:2px;width:12px;height:12px;border-radius:50%;background:var(--panel);border:2px solid var(--line2)}
+  .tl-item.tl-import .tl-dot{border-color:var(--acc);background:var(--acc-dim)}
+  .tl-item.tl-model .tl-dot{border-color:var(--warn);background:rgba(255,184,107,.14)}
+  .tl-item.tl-wiki .tl-dot{border-color:var(--text);background:var(--panel2)}
+  .tl-item.tl-wiki.tl-wiki-del .tl-dot{border-color:var(--err);background:rgba(255,107,107,.14)}
+  .tl-item.tl-wiki.tl-wiki-off .tl-dot{border-color:var(--warn);background:rgba(255,184,107,.14)}
+  .tl-item.tl-log .tl-dot{border-color:var(--line2);background:transparent;border-style:dashed}
+  .tl-content{background:var(--panel2);border:1px solid var(--line);border-radius:3px;padding:10px 14px}
+  .tl-item.tl-import .tl-content{border-left:3px solid var(--acc)}
+  .tl-item.tl-model .tl-content{border-left:3px solid var(--warn)}
+  .tl-item.tl-wiki .tl-content{border-left:3px solid var(--line2)}
+  .tl-item.tl-wiki.tl-wiki-del .tl-content{border-left:3px solid var(--err)}
+  .tl-item.tl-wiki.tl-wiki-off .tl-content{border-left:3px solid var(--warn)}
+  .tl-item.tl-log .tl-content{border:1px dashed var(--line2);border-left:3px solid var(--line2);padding:6px 12px;background:transparent}
+  .tl-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+  .tl-item.tl-log .tl-head{margin-bottom:4px}
+  .tl-type{display:inline-block;padding:1px 7px;border-radius:2px;font-size:10.5px;font-family:var(--mono);border:1px solid var(--line);background:var(--panel);color:var(--dim)}
+  .tl-item.tl-import .tl-type{background:var(--acc-dim);color:var(--acc);border-color:var(--acc)}
+  .tl-item.tl-model .tl-type{background:rgba(255,184,107,.14);color:var(--warn);border-color:var(--warn)}
+  .tl-item.tl-wiki .tl-type{background:var(--panel);color:var(--text);border-color:var(--line2)}
+  .tl-item.tl-wiki.tl-wiki-del .tl-type{background:rgba(255,107,107,.14);color:var(--err);border-color:var(--err)}
+  .tl-item.tl-wiki.tl-wiki-off .tl-type{background:rgba(255,184,107,.14);color:var(--warn);border-color:var(--warn)}
+  .tl-item.tl-log .tl-type{background:var(--panel2);color:var(--dim);border-color:var(--line2)}
+  .tl-item.tl-log.tl-log-warn .tl-type{background:rgba(255,184,107,.14);color:var(--warn);border-color:var(--warn)}
+  .tl-item.tl-log.tl-log-err .tl-type{background:rgba(255,107,107,.14);color:var(--err);border-color:var(--err)}
+  .tl-item.tl-log.tl-log-ok .tl-type{background:var(--acc-dim);color:var(--acc);border-color:var(--acc)}
+  .tl-title{font-family:var(--display);font-size:12.5px;font-weight:600;color:var(--text);letter-spacing:.5px}
+  .tl-item.tl-log .tl-title{font-family:var(--mono);font-size:12px;font-weight:400;color:var(--dim);letter-spacing:0}
+  .tl-item.tl-log.tl-log-warn .tl-title{color:var(--warn)}
+  .tl-item.tl-log.tl-log-err .tl-title{color:var(--err)}
+  .tl-item.tl-log.tl-log-ok .tl-title{color:var(--acc)}
+  .tl-detail{font-size:12px;color:var(--dim);font-family:var(--mono);line-height:1.6}
+  .tl-detail .k{color:var(--dim);display:inline-block;min-width:70px}
+  .tl-detail .v{color:var(--text)}
+  @media(max-width:900px){.timeline{padding-left:20px}.timeline::before{left:8px}.tl-time{position:static;display:block;width:auto;text-align:left;margin-bottom:2px}.tl-dot{left:-18px}}
+  /* ── 渠道 panel（wigolo/mediacrawler 路由表 + 抽屉编辑）── */
+  .sites-toolbar{display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+  .sites-search{background:var(--panel2);border:1px solid var(--line);border-radius:2px;color:var(--text);padding:6px 10px;font-size:12px;font-family:var(--mono);width:260px}
+  .sites-search:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 1px var(--acc-dim)}
+  .tbl .ctr{text-align:center}
+  .tbl .prio{font-family:var(--mono);font-size:14px;color:var(--acc);font-variant-numeric:tabular-nums}
+  .tbl .name{font-family:var(--display);font-weight:600;color:var(--text);letter-spacing:.3px}
+  .tbl .desc{color:var(--text);font-size:12px}
+  .tbl tr.row-click{cursor:pointer}
+  .tbl tr.row-click.selected td{background:linear-gradient(90deg,var(--acc-dim),transparent 60%)}
+  .sites-hd{padding:12px 16px;background:linear-gradient(90deg,rgba(124,227,139,.04),transparent 70%);border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:16px}
+  .sites-hd .ttl{font-family:var(--display);font-size:14px;font-weight:600;letter-spacing:.5px}
+  .sites-hd .sub{color:var(--dim);font-size:11px;margin-top:2px}
+  .sites-bd{padding:10px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;background:var(--panel2);font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--dim)}
+  .drawer-field{margin-bottom:14px}
+  .drawer-field label{font-family:var(--mono);font-size:10px;letter-spacing:1.4px;color:var(--dim);display:block;margin-bottom:5px}
+  .drawer-field input,.drawer-field textarea,.drawer-field select{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:2px;color:var(--text);padding:7px 10px;font-size:12.5px;font-family:var(--mono)}
+  .drawer-field textarea{min-height:70px;resize:vertical;line-height:1.6}
+  .drawer-field small{display:block;color:var(--dim);font-size:11px;margin-top:5px}
+  .detail-row{display:flex;gap:10px;align-items:center}
 </style>
 </head>
 <body>
@@ -485,9 +546,11 @@
       <div class="nav-sep">PLUGIN</div>
       <a data-panel="src">数据源</a>
       <a data-panel="rec">记录</a>
-      <a data-panel="logs">日志</a>
       <a data-panel="cfg">配置</a>
+      <div class="nav-sep">WEB</div>
+      <a data-panel="channel">渠道</a>
       <div class="nav-sep">SYSTEM</div>
+      <a data-panel="logs">日志</a>
       <a data-panel="about">关于</a>
     </nav>
 
@@ -680,12 +743,12 @@
       <!-- Mem0 导入（照 8127 沙盒验证版：游标只读 + 记忆总量 + 分 tab 定时/手动 + 进度卡） -->
       <!-- Mem0 写入（2026-11-02 用户：导入前端交互完全照抄 OV —— 导入方式分 tab/循环设定/导入数量/进度卡/失败批次卡；保留记忆总量） -->
       <section id="panel-mem0import" class="hidden">
-        <div class="flow-hint"><b>Mem0 写入：</b>解析导入（infer=True，LLM 抽取原子记忆）· 会话级游标（每会话 {timeMs,id} 双键，按 token 预算分批、不跨会话）· 导入数量（条数）控制 · 循环定时/手动导入 · 进度 = 已解析消息总数 / 全库消息总数。</div>
+        <div class="flow-hint"><b>Mem0 写入：</b>解析导入（infer=True，LLM 抽取原子记忆）· 会话级游标（每会话 {timeMs,id} 双键，按 token 预算分批、不跨会话）· 导入数量（条数）控制 · 循环定时/手动导入 · 进度 = 已解析消息总数 / 全库消息总数（排除工具调用）。</div>
         <div class="card">
           <h3>Mem0 写入 <span class="sub">循环定时与手动导入分 tab · 导入数量（条数）控制</span></h3>
           <div class="row"><label>已解析消息</label>
             <span class="cursor-chip">⛳ <b id="m0Resolved">—</b> / <b id="m0ResolvedTotal">—</b></span>
-            <span style="color:var(--dim);font-size:11.5px">已解析消息总数 / 全库消息总数 · 随进度实时推进（会话级游标 {timeMs,id} 双键）</span>
+            <span style="color:var(--dim);font-size:11.5px">已解析消息总数 / 全库消息总数（排除工具调用）· 随进度实时推进（会话级游标 {timeMs,id} 双键）</span>
           </div>
           <div class="row"><label>Mem0 记忆总量</label><span class="tag g" id="m0MemoryCount" style="font-size:13px">—</span><span style="color:var(--dim);font-size:11.5px">mem0 库内记忆条数（建库后统计）</span></div>
           <div class="row" style="margin-top:12px"><label>导入方式</label>
@@ -1684,17 +1747,35 @@
         </div>
       </section>
 
-      <!-- 日志 -->
+      <!-- 日志 → 事件记录时间线 -->
       <section id="panel-logs" class="hidden">
-        <div class="card"><h3>运行日志</h3>
-          <div id="logList"></div>
-          <div class="row" style="margin-top:12px"><button class="btn ghost" onclick="loadLogs()">刷新</button><span class="tag" style="color:var(--dim)">state: .asset-import-state.json · 断点续传自动</span></div>
+        <div class="card"><h3>事件记录时间线</h3>
+          <div class="timeline" id="timelineList"></div>
+          <div class="dsui pager" id="timelinePager"></div>
+          <div class="row" style="margin-top:12px">
+            <button class="btn ghost" onclick="loadTimeline(1)">刷新</button>
+            <span class="tag" style="color:var(--dim)">每页</span>
+            <select id="timelineSize" onchange="timelineSize=+this.value;loadTimeline(1)">
+              <option>10</option><option>30</option><option selected>50</option><option>100</option>
+            </select><span class="tag" style="color:var(--dim)">条</span>
+          </div>
         </div>
       </section>
 
       <!-- ══════════ PLUGIN 定稿：数据源（4 张独立卡，定稿结构）══════════ -->
       <section id="panel-src" class="hidden dsui">
         <div id="dsuiSrcList"><div class="note">加载中…</div></div>
+      </section>
+
+      <!-- ══════════ WEB 定稿：渠道（Wigolo/MediaCrawler 双后端路由表，阶段1=读目录，保存待后端）══════════
+             忠实移植 web-catalog-mock.html：banner+nav 由 6601 外壳承担，panel 内容=mock 的双 backend 大卡 + 抽屉 -->
+      <section id="panel-channel" class="hidden dsui">
+        <div id="channelRoot"><div class="note">加载中…</div></div>
+        <div class="note" style="margin-top:12px">
+          Wigolo = 通用网页搜索（domain 即可构造 <code>site:</code> query）；MediaCrawler = 平台专用爬虫（每站必须绑定 PLATFORM，新增站点可选 zhihu/xhs/douyin/bilibili/kuaishou/weibo/tieba，X/IG/TikTok 国际版需后端写新爬虫模块）。
+          行点击 = 选中并载入抽屉编辑；<b>CRAWL</b> 开启 = 该行仅作路线指引（Wigolo 抓不到，agent 需转 <code>deep_search_crawl</code>，目录只呈现 NAME / DESCRIPTION + 固定指引）。
+          保存回写 <code>/web-catalog/sites/:id</code>（阶段1 数据读现有只读目录，写接口阶段2接通）。
+        </div>
       </section>
 
       <!-- ══════════ PLUGIN 定稿：记录（完整表格+分页器，数据待后端）══════════ -->
@@ -2281,12 +2362,47 @@ async function applyM0Embedding() {
   await loadEmbPresets();
 }
 
-async function loadLogs() {
+// ── 事件记录时间线（替换旧 logline 纯文本列表）──
+let timelinePage = 1, timelineSize = 50;
+const TL_CLASS = { 'Mem0 导入': 'tl-import', 'OV 导入': 'tl-import', 'Wiki 新增': 'tl-wiki', 'Wiki 更新': 'tl-wiki', 'Wiki 删除': 'tl-wiki tl-wiki-del', 'Wiki 启用': 'tl-wiki', 'Wiki 关闭': 'tl-wiki tl-wiki-off', 'Wiki 首次完成': 'tl-wiki', '模型参数': 'tl-model', '预设参数': 'tl-model' };
+const TL_LOG_LVL = { info: '', warn: 'tl-log-warn', err: 'tl-log-err', error: 'tl-log-err', ok: 'tl-log-ok' };
+// tlEsc：时间线专用转义（顶层已有 function esc，顶层 const esc 会 SyntaxError 重复声明，故另名）
+const tlEsc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+async function loadTimeline(page = timelinePage) {
+  timelinePage = page;
   try {
-    const j = await api('/api/logs');
-    $('logList').innerHTML = (j.logs || []).map((l) =>
-      `<div class="logline ${l.kind === 'err' ? 'err' : (l.kind === 'ok' ? 'ok' : '')}"><span class="t">${l.time}</span>[${l.kind}] ${l.text}</div>`).join('') || '<div class="note">暂无日志</div>';
+    const j = await api(`/api/logs?page=${timelinePage}&size=${timelineSize}`);
+    const items = j.logs || [];
+    $('timelineList').innerHTML = items.map((it) => {
+      const isLog = it.type === 'log';
+      const cls = isLog ? `tl-log ${TL_LOG_LVL[it.subtype] || ''}` : (TL_CLASS[it.subtype] || 'tl-log');
+      // 旧日志 ts=null → 显示「（时间未知）」不伪造日期；结构化事件按 ts 到分
+      const timeDisp = it.ts ? String(it.ts).replace('T', ' ').slice(0, 16) : (isLog ? '（时间未知）' : '');
+      const det = Object.entries(it.fields || {}).map(([k, v]) =>
+        `<div><span class="k">${tlEsc(k)}</span><span class="v">${tlEsc(v)}</span></div>`).join('');
+      return `<div class="tl-item ${cls}">
+        <div class="tl-time">${tlEsc(timeDisp)}</div><div class="tl-dot"></div>
+        <div class="tl-content"><div class="tl-head"><span class="tl-type">${tlEsc(it.subtype || it.type)}</span>
+        <span class="tl-title">${tlEsc(it.title)}</span></div>${det ? `<div class="tl-detail">${det}</div>` : ''}</div></div>`;
+    }).join('') || '<div class="note">暂无事件</div>';
+    renderTimelinePager(j.total, j.page, j.size);
   } catch (e) { toast(e.message); }
+}
+
+function renderTimelinePager(total, page, size) {
+  const pages = Math.max(1, Math.ceil((total || 0) / size));
+  const win = 7;                                   // 当前页居中窗口
+  let lo = Math.max(1, page - Math.floor(win / 2));
+  let hi = Math.min(pages, lo + win - 1);
+  lo = Math.max(1, hi - win + 1);
+  let h = `<span class="total">共 ${total} 条</span>`;
+  h += `<button ${page <= 1 ? 'disabled' : ''} onclick="loadTimeline(${page - 1})">‹ 上一页</button>`;
+  if (lo > 1) h += `<button onclick="loadTimeline(1)">1</button><span>…</span>`;
+  for (let i = lo; i <= hi; i++) h += `<button class="${i === page ? 'active' : ''}" onclick="loadTimeline(${i})">${i}</button>`;
+  if (hi < pages) h += `<span>…</span><button onclick="loadTimeline(${pages})">${pages}</button>`;
+  h += `<button ${page >= pages ? 'disabled' : ''} onclick="loadTimeline(${page + 1})">下一页 ›</button>`;
+  $('timelinePager').innerHTML = h;
 }
 
 function renderRetrieve() {
@@ -2307,7 +2423,7 @@ document.querySelectorAll('nav a[data-panel]').forEach((a) => {
     document.querySelectorAll('nav a').forEach((x) => x.classList.toggle('on', x === a));
     document.querySelectorAll('main section').forEach((s) => s.classList.add('hidden'));
     $('panel-' + a.dataset.panel).classList.remove('hidden');
-    if (a.dataset.panel === 'logs') loadLogs();
+    if (a.dataset.panel === 'logs') loadTimeline();
     if (a.dataset.panel === 'evoke') loadEvoke();
     if (a.dataset.panel === 'ovimport') loadOv();
     if (a.dataset.panel === 'model') { loadModelPresets(); loadEmbPresets(); loadOvVlm(); loadM0Model(); loadM0Presets(); }
@@ -2318,6 +2434,7 @@ document.querySelectorAll('nav a[data-panel]').forEach((a) => {
     if (a.dataset.panel === 'src') dsuiLoadSources();
     if (a.dataset.panel === 'rec') dsuiLoadCfg();
     if (a.dataset.panel === 'cfg') dsuiLoadCfg();
+    if (a.dataset.panel === 'channel') channelLoad();
   });
 });
 
@@ -3326,7 +3443,7 @@ loadStatus();
 dsuiLoadOverview();   // PLUGIN 定稿：概览四源状态卡（初始概览即显示）
 refreshMuted();
 renderRetrieve();
-loadLogs();
+loadTimeline();
 loadModelPresets();
 loadOvVlm();
 setInterval(loadStatus, 5000);
@@ -4629,6 +4746,15 @@ function dsuiStatusClass(st) {
   if (st === 'unavailable' || st === 'down') return 'err';
   return 'warn';
 }
+function dsuiFormatLocalTime(value, fallback = '待后端') {
+  if (!value) return fallback;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return fallback;
+  return new Intl.DateTimeFormat('sv-SE', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).format(date);
+}
 // 定稿 stat 结构：s-name + s-meta（服务端口/上次同步时间）+ n（大数字）。无 .l 说明行。
 async function dsuiLoadOverview() {
    const grid = document.getElementById('dsuiOverviewGrid');
@@ -4639,7 +4765,7 @@ async function dsuiLoadOverview() {
    const srcStats = (stats && stats.sources) || {};
    const metaMap = { ov_context: ['服务端口', 'port'], mem0: ['服务端口', 'port'], ov_session: ['上次同步时间', 'lastSync'], wiki: ['上次同步时间', 'lastSync'] };
    const fmtNum = (v) => (v == null ? '待后端' : Number(v).toLocaleString('en-US'));
-   const fmtTs = (v) => (v ? String(v).slice(0, 19).replace('T', ' ') : '待后端');
+   const fmtTs = (v) => dsuiFormatLocalTime(v);
    const valOf = (s, key) => {
      const st = srcStats[s] || {};
      if (key === 'port') return st.port || '本地扫描';
@@ -4670,7 +4796,7 @@ async function dsuiLoadOverview() {
    const srcStats = (stats && stats.sources) || {};
    const metaMap = { ov_context: ['服务端口', 'port'], mem0: ['服务端口', 'port'], ov_session: ['上次同步时间', 'lastSync'], wiki: ['上次同步时间', 'lastSync'] };
    const fmtNum = (v) => (v == null ? '待后端' : Number(v).toLocaleString('en-US'));
-   const fmtTs = (v) => (v ? String(v).slice(0, 19).replace('T', ' ') : '待后端');
+   const fmtTs = (v) => dsuiFormatLocalTime(v);
    for (const s of ['ov_context', 'mem0', 'ov_session', 'wiki']) {
      const st = srcStatus.find(x => x.source === s);
      const cls = dsuiStatusClass(st ? st.status : 'warn');
@@ -4689,7 +4815,7 @@ async function dsuiLoadOverview() {
      for (const a of assets) {
        const st = (a.enabled && a.state === 'ready') ? 'ok' : 'warn';
        const stTxt = (a.enabled && a.state === 'ready') ? '可用' : (a.enabled ? a.state : '禁用');
-       const ts = a.lastUpdate ? String(a.lastUpdate).slice(0, 19).replace('T', ' ') : '—';
+       const ts = dsuiFormatLocalTime(a.lastUpdate, '—');
        const blk = a.blocks != null ? fmtNum(a.blocks) : '待后端';
        rows += '<tr><td>' + (a.name || a.id) + '</td><td class="st ' + st + '">' + stTxt + '</td><td>' + blk + '</td><td>' + ts + '</td></tr>';
      }
@@ -4759,5 +4885,432 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') wikiCloseD
 </script>
  <!-- Mem0 UI：batch/session 进度派生 + 渲染（模块；api/toast 助手已在前方定义） -->
  <script type="module" src="/mem0-ui.js"></script>
+
+<!-- ══════════ 渠道抽屉编辑（wigolo 全字段 / mediacrawler 仅名称+平台+启用）══════════ -->
+<div class="drawer-backdrop" id="channelDrawerBackdrop" onclick="channelCloseDrawer()"></div>
+<aside class="drawer" id="channelDrawer">
+  <div class="card" style="min-height:calc(100dvh - 44px)">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+      <h3 style="margin:0" id="channelDrawerTitle">站点详情</h3>
+      <span class="tag" id="channelDrawerPill" style="margin-left:auto">未选择</span>
+      <button class="drawer-close" onclick="channelCloseDrawer()">×</button>
+    </div>
+    <div class="drawer-field"><label>NAME</label><input type="text" id="sfName" placeholder="站点名"></div>
+    <div class="drawer-field" id="sfDomainWrap"><label>DOMAIN</label><input type="text" id="sfDomain" placeholder="example.com"></div>
+    <div class="drawer-field" id="sfCategoryWrap"><label>CATEGORY</label>
+      <select id="sfCategory" onchange="channelOnCategoryChange(this)"></select>
+      <div class="detail-row" id="sfNewCategoryRow" style="display:none;margin-top:8px">
+        <input type="text" id="sfNewCategory" placeholder="小写+下划线，如 tutorial" style="flex:1">
+        <button class="btn" style="padding:4px 10px;font-size:11px" onclick="channelConfirmNewCategory()">确认</button>
+        <button class="btn ghost" style="padding:4px 10px;font-size:11px" onclick="channelCancelNewCategory()">取消</button>
+      </div>
+      <small>受控词表，给 agent 按意图路由用。</small>
+    </div>
+    <div class="drawer-field" id="sfPlatformWrap"><label>PLATFORM</label>
+      <select id="sfPlatform">
+        <option value="zhihu">zhihu · 知乎</option>
+        <option value="xhs">xhs · 小红书</option>
+        <option value="douyin">douyin · 抖音</option>
+        <option value="bilibili">bilibili · B站</option>
+        <option value="kuaishou">kuaishou · 快手</option>
+        <option value="weibo">weibo · 微博</option>
+        <option value="tieba">tieba · 贴吧</option>
+      </select>
+      <small>MediaCrawler 每站必须绑定平台脚本。</small>
+    </div>
+    <div class="drawer-field" id="sfDescWrap"><label>DESCRIPTION</label><textarea id="sfDesc" placeholder="站点说明（显示在目录中）"></textarea></div>
+    <div class="drawer-field" id="sfPriorityWrap"><label>PRIORITY</label>
+      <input type="number" id="sfPriority" min="0" max="100"><small>0–100，越大越先被选中。</small>
+    </div>
+    <div class="drawer-field" id="sfQueryHintWrap"><label>QUERY HINT</label>
+      <input type="text" id="sfQueryHint" placeholder="site:example.com"><small>拼到检索 query 的 hint 模板。</small>
+    </div>
+    <div class="drawer-field" id="sfProxyWrap"><label>PROXY_REQUIRED</label>
+      <div class="detail-row"><span class="switch" id="sfProxy" onclick="channelToggleSwitch('sfProxy')"></span><span class="note" id="sfProxyText"></span></div>
+      <small>开启 = 走代理（:3334）；关闭 = 直连（:3333）。</small>
+    </div>
+    <div class="drawer-field" id="sfEnabledWrap"><label>ENABLED</label>
+      <div class="detail-row"><span class="switch" id="sfEnabled" onclick="channelToggleSwitch('sfEnabled')"></span><span class="note" id="sfEnabledText"></span></div>
+    </div>
+    <div class="drawer-field" id="sfCrawlWrap"><label>CRAWL</label>
+      <div class="detail-row"><span class="switch" id="sfCrawl" onclick="channelToggleSwitch('sfCrawl')"></span><span class="note" id="sfCrawlText"></span></div>
+      <small>开启 = 此行仅作路线指引：Wigolo 抓不到该站，agent 需转 deep_search_crawl。目录里只呈现 NAME / DESCRIPTION + 固定指引，其余字段不展示。</small>
+    </div>
+    <div class="sites-toolbar" style="margin-top:20px">
+      <button class="btn" onclick="channelSaveDrawer()">保存</button>
+      <button class="btn ghost" onclick="channelDeleteSite()">删除</button>
+      <span class="note" id="sfSaveHint"></span>
+    </div>
+    <div class="note" id="sfDrawerMeta" style="margin-top:12px;display:none">
+      <div>站点 ID　<b id="sfMetaId" style="color:var(--acc);font-family:var(--mono)"></b></div>
+      <div>归属后端　<b id="sfMetaBackend" style="color:var(--acc);font-family:var(--mono)"></b></div>
+    </div>
+  </div>
+</aside>
+
+<script>
+/* ══════════ 渠道 panel（忠实移植 web-catalog-mock.html：双 backend 大卡 + 抽屉）══════════
+   阶段1：wigolo = GET /web-catalog → {sites:[{id,name,domain,category,description,priority,queryHint,proxy,enabled}],categories}
+          mediacrawler = GET /crawl-catalog → {platforms:[{id,name,enabled}]}
+   保存走 mock（console.log），阶段2 接通 /web-catalog/sites 写接口。crawl 开关阶段1 默认全关（后端尚无 crawl 字段） */
+const CHANNEL = { wigolo: [], crawl: [], categories: [], search: '', selectedId: null, editingId: null, draftBackend: null, editingCategoryValue: '', isNew: false };
+
+function channelEsc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function channelFind(backend,id){ return backend==='wigolo' ? CHANNEL.wigolo.find(x=>x.id===id) : CHANNEL.crawl.find(x=>x.id===id); }
+
+// MediaCrawler 平台清单：固定 6 个（保存有登录态的可用平台）。
+// 用户定稿：wigolo 无登录态，这 6 个只有经 mediacrawler 才能用，故不属于 wigolo 表。
+// mediacrawler 行只需 NAME + DESCRIPTION + CRAWL 状态（enabled），其余列多余。
+const MC_STATIC_PLATFORMS = [
+  { id:'zhihu',       name:'知乎',   description:'中文问答社区，技术讨论与经验帖深度高；查中文技术问题、行业经验时用', enabled:true },
+  { id:'bilibili',    name:'B站',    description:'综合视频平台，教程与实操演示密集；要跟着视频操作、看演示时用', enabled:true },
+  { id:'weibo',       name:'微博',   description:'中文社交平台，热点与实时讨论集中；追最新动态、看大众反应时用', enabled:true },
+  { id:'douyin',      name:'抖音',   description:'短视频平台，内容传播广；看短视频教程/演示、查热门内容时用', enabled:true },
+  { id:'xiaohongshu', name:'小红书', description:'笔记型内容社区，生活方式与实操经验多；找图文教程、真实使用体验时用', enabled:true },
+  { id:'kuaishou',    name:'快手',   description:'短视频平台，下沉与生活类内容多；查生活类实操、大众向内容时用', enabled:true },
+];
+
+// Wigolo 站点定稿（14 条）：wigolo 无登录态，只收可用 URL 检索的公开站；需登录的平台归 mediacrawler。
+// 阶段1 后端未接时作兜底显示；阶段2 接通后以 /web-catalog 返回的同名数据为准（seed 即此批）。
+const WIGOLO_STATIC_SEED = [
+  { name:'Google',             domain:'google.com',             category:'search_engine', description:'全网与英文技术内容检索；查跨站资料、最新信息，或用 site: 精确锁站', priority:10, proxy:true,  crawl:false, enabled:true },
+  { name:'Bing 国际版',        domain:'bing.com',               category:'search_engine', description:'通用全网检索；Google 结果不足或需另一套索引时用', priority:11, proxy:true,  crawl:false, enabled:true },
+  { name:'Bing 国内版',        domain:'cn.bing.com',            category:'search_engine', description:'免代理的全网检索兜底；代理未开或国际搜索不可达时用', priority:99, proxy:false, crawl:false, enabled:true },
+  { name:'GitHub',             domain:'github.com',             category:'developer_community', description:'开源仓库源码、Issues/Discussions、版本发布与更新记录；查项目实现、报错解法、版本变化时用', priority:20, proxy:true,  crawl:false, enabled:true },
+  { name:'LiblibAI',           domain:'liblib.art',             category:'aigc', description:'模型与 LoRA、参考图、提示词与参数、ComfyUI 工作流，可在线生图；国内网络下找灵感、反查提示词/参数、试跑工作流时用', priority:40, proxy:false, crawl:false, enabled:true },
+  { name:'Civitai',            domain:'civitai.com',            category:'aigc', description:'模型与 LoRA、图片/视频参考、提示词与参数、工作流、教程；要海外模型与风格、按作品反查资源时用', priority:41, proxy:true,  crawl:false, enabled:true },
+  { name:'Comfy 工作流库',     domain:'comfy.org/workflows',    category:'aigc', description:'ComfyUI 官方与社区工作流模板；不想从零连线、要抄成熟模板时用', priority:42, proxy:true,  crawl:false, enabled:true },
+  { name:'Pixabay Music',      domain:'pixabay.com/music',      category:'audio', description:'可商用背景音乐与通用音效；短剧/视频快速选 BGM 时用', priority:70, proxy:false, crawl:false, enabled:true },
+  { name:'Freesound',          domain:'freesound.org',          category:'audio', description:'具体拟音与环境音；找脚步/开门/雨声等细节音效时用，需核对许可证', priority:71, proxy:true,  crawl:false, enabled:true },
+  { name:'Pexels',             domain:'pexels.com',             category:'image', description:'免费实拍照片、视频空镜与 B-roll；短剧/封面/视频背景素材时用', priority:80, proxy:false, crawl:false, enabled:true },
+  { name:'Pixabay',            domain:'pixabay.com',            category:'image', description:'摄影、插画、矢量与 AI 图；Pexels 缺插画或矢量素材时补位', priority:81, proxy:false, crawl:false, enabled:true },
+  { name:'抖音短剧创作者中心', domain:'shortdramas.com',        category:'script', description:'官方题材趋势、IP、投稿与分账；了解平台需求或走官方投稿时用', priority:90, proxy:false, crawl:false, enabled:true },
+  { name:'咔咔猩',             domain:'kakaxing.com',           category:'script', description:'AI 编剧、剧本供给、质量评估与视频拉片；生成、评估或买可拍剧本时用', priority:91, proxy:false, crawl:false, enabled:true },
+  { name:'33 台词',            domain:'33.agilestudio.cn',      category:'script', description:'按台词反查影片与时间点；找原片桥段、拉片定位时用', priority:94, proxy:false, crawl:false, enabled:true },
+  // 6 个社媒站：有登录态、经 mediacrawler 抓取；crawl=true 表示进插件 catalogBlock 的 crawl 分段
+  { name:'知乎',   domain:'zhihu.com',       category:'social', description:'中文问答社区，技术讨论与经验帖深度高；查中文技术问题、行业经验时用', priority:30, proxy:false, crawl:true, enabled:true },
+  { name:'B站',    domain:'bilibili.com',    category:'social', description:'综合视频平台，教程与实操演示密集；要跟着视频操作、看演示时用', priority:31, proxy:false, crawl:true, enabled:true },
+  { name:'微博',   domain:'weibo.com',       category:'social', description:'中文社交平台，热点与实时讨论集中；追最新动态、看大众反应时用', priority:32, proxy:false, crawl:true, enabled:true },
+  { name:'抖音',   domain:'douyin.com',      category:'social', description:'短视频平台，内容传播广；看短视频教程/演示、查热门内容时用', priority:33, proxy:false, crawl:true, enabled:true },
+  { name:'小红书', domain:'xiaohongshu.com', category:'social', description:'笔记型内容社区，生活方式与实操经验多；找图文教程、真实使用体验时用', priority:34, proxy:false, crawl:true, enabled:true },
+  { name:'快手',   domain:'kuaishou.com',    category:'social', description:'短视频平台，下沉与生活类内容多；查生活类实操、大众向内容时用', priority:35, proxy:false, crawl:true, enabled:true },
+];
+
+async function channelLoad(){
+  const root=document.getElementById('channelRoot');
+  if(!root) return;
+  root.innerHTML='<div class="note">加载中…</div>';
+  // wigolo 优先走 Console /web-catalog；后端未接/不可达时用 WIGOLO_STATIC_SEED 兜底显示（阶段2 接通后以后端为准）。
+  // mediacrawler 纯前端静态（无后端、无编辑入口），不依赖 Console。
+  const web = await dsuiApi('/web-catalog');
+  const webOk = web && Array.isArray(web.sites);
+  CHANNEL.wigolo = webOk ? web.sites : WIGOLO_STATIC_SEED.map((s,i)=>({ id:'seed-'+i, ...s }));
+  CHANNEL.categories = webOk ? (web.categories||[]) : [];
+  CHANNEL.crawl = MC_STATIC_PLATFORMS.slice();
+  CHANNEL.backendState = { wigolo: webOk ? 'ok' : 'seed', mediacrawler: 'static' };
+  channelRender();
+}
+
+function channelRender(){
+  const root=document.getElementById('channelRoot');
+  if(!root) return;
+  const kw = CHANNEL.search.toLowerCase();
+  const match = (s) => !kw || [s.name,s.domain,s.category,s.description,s.platform].some(v=>String(v||'').toLowerCase().includes(kw));
+  const backends = [
+    { id:'wigolo', name:'wigolo', desc:'通用网页搜索 · Wigolo adapter', isWigolo:true },
+    { id:'mediacrawler', name:'mediacrawler', desc:'平台专用爬虫 · MediaCrawler adapter', isWigolo:false },
+  ];
+  root.innerHTML = backends.map((b,i)=>{
+    const all = b.isWigolo ? CHANNEL.wigolo : CHANNEL.crawl;
+    const list = all.filter(match);
+    const total = all.length;
+    const onCount = list.filter(s=>s.enabled).length;
+    const proxyCount = b.isWigolo ? CHANNEL.wigolo.filter(s=>s.proxy).length : 0;
+    const rows = list.map(s=>{
+      const isMc = !b.isWigolo; // mediacrawler 静态清单：只读，无编辑入口；只 NAME+DESCRIPTION+CRAWL
+      const selected = CHANNEL.selectedId===s.id ? ' selected':'';
+      const platformCell = ''; // mediacrawler 已去掉 PLATFORM 列（用户定稿：调用用不上）
+      const proxyCell = b.isWigolo ? `<td class="ctr"><span class="switch ${s.proxy?'on':''}" onclick="event.stopPropagation();channelQuickToggle('${channelEsc(s.id)}','proxy')"></span></td>` : '';
+      const crawlCell = b.isWigolo
+        ? `<td class="ctr"><span class="switch ${s.crawl?'on':''}" onclick="event.stopPropagation();channelQuickToggle('${channelEsc(s.id)}','crawl')"></span></td>`
+        : `<td class="ctr"><span class="switch ${s.enabled?'on':''}"></span></td>`; // mediacrawler CRAWL=有登录态可抓，只读
+      const descText = channelEsc(s.description||s.desc||'');
+      const descCell = `<td class="ctr-desc"><span class="desc" title="${descText}">${descText}</span></td>`;
+      const prioCell = b.isWigolo ? `<td><span class="prio">${s.priority??'—'}</span></td>` : '';
+      // crawl=true（登录态社媒站）：DOMAIN 对 mediacrawler 无意义，锁死为空不显示（用户定稿 2026-11-08）
+      const domainCell = b.isWigolo ? `<td>${s.crawl ? '<span style="color:var(--dim)">—</span>' : `<span class="mono" style="color:var(--dim)">${channelEsc(s.domain)}</span>`}</td>` : '';
+      const catCell = b.isWigolo ? `<td><span class="tag">${channelEsc(s.category)}</span></td>` : '';
+      const enabledCell = b.isWigolo
+        ? `<td class="ctr"><span class="switch ${s.enabled?'on':''}" onclick="event.stopPropagation();channelQuickToggle('${channelEsc(s.id)}','enabled')"></span></td>`
+        : ''; // mediacrawler 无独立 ENABLED 列，启用态即 CRAWL
+      const rowTag = isMc ? 'tr' : `tr class="row-click${selected}" onclick="channelOpenDrawer('${b.id}','${channelEsc(s.id)}')"`;
+      return `<${rowTag}>
+        <td><span class="name">${channelEsc(s.name)}</span></td>
+        ${domainCell}${catCell}${platformCell}${descCell}${prioCell}${proxyCell}
+        ${enabledCell}
+        ${crawlCell}
+      </tr>`;
+    }).join('');
+    const backendIdx = String(i+1).padStart(2,'0');
+    const mcStatic = (CHANNEL.backendState||{})[b.id]==='static';
+    const seedMode = (CHANNEL.backendState||{})[b.id]==='seed';
+    const unreachable = (CHANNEL.backendState||{})[b.id]==='unreachable';
+    const healthTag = mcStatic ? '<span class="tag">静态清单</span>'
+      : seedMode ? '<span class="tag">静态种子</span>'
+      : unreachable ? '<span class="tag y">不可达</span>'
+      : (total ? '<span class="tag g">ready</span>' : '<span class="tag">—</span>');
+    const addBtn = b.isWigolo ? `<button class="btn ghost" style="padding:4px 10px;font-size:11px" onclick="channelAdd('${b.id}')">+ 新增</button>` : '<span style="color:var(--dim)">固定清单 · 无编辑入口</span>';
+    const subLabel = b.isWigolo ? `// SITES · ${total}${total?` · PROXY ${proxyCount}走代理`:''}` : `// PLATFORMS · ${total}（固定）`;
+    const thead = b.isWigolo
+      ? '<th>NAME</th><th>DOMAIN</th><th>CATEGORY</th><th>DESCRIPTION</th><th>PRIORITY</th><th class="ctr">PROXY</th><th class="ctr">ENABLED</th><th class="ctr">CRAWL</th>'
+      : '<th>NAME</th><th>DESCRIPTION</th><th class="ctr">CRAWL</th>';
+    const colspan = b.isWigolo ? 8 : 3;
+    const emptyMsg = unreachable ? 'Console 端点无响应，目录不可达（阶段2 接通后端后显示）' : (mcStatic ? '无平台' : `无匹配${b.isWigolo?'站点':'平台'}`);
+    return `<div class="card" style="padding:0;overflow:hidden">
+      <div class="sites-hd" style="display:grid;grid-template-columns:1.6fr 1fr 1fr;gap:18px;align-items:center">
+        <div>
+          <div style="font-family:var(--mono);font-size:9px;letter-spacing:2px;color:var(--dim);opacity:.7;margin-bottom:4px">BACKEND / ${backendIdx}</div>
+          <div style="font-family:var(--display);font-size:15px;font-weight:600;letter-spacing:.5px">${channelEsc(b.name)}</div>
+          <div style="color:var(--dim);font-size:11px;margin-top:3px">${channelEsc(b.desc)}</div>
+        </div>
+        <div><div style="font-family:var(--mono);font-size:9px;letter-spacing:2px;color:var(--dim);opacity:.7;margin-bottom:4px">SITES</div><span class="tag">${onCount} / ${total} ON</span></div>
+        <div><div style="font-family:var(--mono);font-size:9px;letter-spacing:2px;color:var(--dim);opacity:.7;margin-bottom:4px">HEALTH</div>${healthTag}</div>
+      </div>
+      <div class="sites-bd"><span>${subLabel}</span>${addBtn}</div>
+      <div style="overflow-x:auto"><table class="tbl" style="table-layout:fixed;width:100%">
+        <colgroup>${b.isWigolo
+          ? '<col style="width:140px"><col style="width:150px"><col style="width:140px"><col style="width:auto"><col style="width:60px"><col style="width:56px"><col style="width:56px"><col style="width:56px">'
+          : '<col style="width:120px"><col style="width:auto"><col style="width:70px">'
+        }</colgroup>
+        <thead><tr>${thead}</tr></thead>
+        <tbody>${rows || `<tr><td colspan="${colspan}" style="text-align:center;color:var(--dim);padding:14px">${emptyMsg}</td></tr>`}</tbody>
+      </table></div>
+    </div>`;
+  }).join('');
+}
+
+async function channelQuickToggle(id,field){
+  // 仅 wigolo 站点走真 API 持久化；mediacrawler 是固定只读清单，开关不触发写。
+  const isWigolo = CHANNEL.wigolo.some(x=>x.id===id);
+  const b = isWigolo ? CHANNEL.wigolo : CHANNEL.crawl;
+  const s = b.find(x=>x.id===id); if(!s) return;
+  const newVal = !s[field];
+  if (!isWigolo) return; // mediacrawler 无编辑入口
+  try {
+    const r = await fetch(`/web-catalog/sites/${encodeURIComponent(id)}`, {
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ [field]: newVal })
+    });
+    if (r.ok) { s[field] = newVal; }
+    else { console.error('toggle save fail', r.status); }
+  } catch(e) { console.error('toggle save err', e); }
+  channelRender();
+}
+
+/* ── CATEGORY：受控词表 + 可新建 ── */
+function channelAllCategories(){
+  const set=new Set(CHANNEL.categories);
+  CHANNEL.wigolo.forEach(s=>{ if(s.category) set.add(s.category) });
+  return Array.from(set).sort();
+}
+function channelRenderCategorySelect(current){
+  const sel=document.getElementById('sfCategory');
+  const cats=channelAllCategories();
+  if(current && !cats.includes(current)) cats.push(current), cats.sort();
+  sel.innerHTML=cats.map(c=>`<option value="${channelEsc(c)}">${channelEsc(c)}</option>`).join('')
+    + `<option value="__new__">＋ 新建类别…</option>`;
+  sel.value=current||'';
+}
+function channelOnCategoryChange(sel){
+  if(sel.value==='__new__'){
+    CHANNEL.editingCategoryValue=sel.dataset.prev||'';
+    document.getElementById('sfNewCategoryRow').style.display='';
+    document.getElementById('sfNewCategory').value='';
+    document.getElementById('sfNewCategory').focus();
+  }
+}
+function channelCancelNewCategory(){
+  document.getElementById('sfNewCategoryRow').style.display='none';
+  const sel=document.getElementById('sfCategory');
+  sel.value=CHANNEL.editingCategoryValue||(channelAllCategories()[0]||'');
+}
+function channelConfirmNewCategory(){
+  const v=document.getElementById('sfNewCategory').value.trim().toLowerCase().replace(/[^a-z0-9_]/g,'_');
+  if(!v){ channelCancelNewCategory(); return; }
+  CHANNEL.editingCategoryValue=v;
+  channelRenderCategorySelect(v);
+  document.getElementById('sfCategory').value=v;
+  document.getElementById('sfNewCategoryRow').style.display='none';
+  document.getElementById('sfSaveHint').textContent='新类别「'+v+'」已选，保存后生效';
+}
+
+/* ── 抽屉 ── */
+function channelShow(id,show){ const e=document.getElementById(id); if(e) e.style.display=show?'':'none'; }
+function channelSetSwitch(id,on,textId){ document.getElementById(id).classList.toggle('on',on); const t=document.getElementById(textId); if(t) t.textContent = on ? '启用' : '禁用'; }
+function channelSwitchText(){
+  document.getElementById('sfProxyText').textContent  = document.getElementById('sfProxy').classList.contains('on')  ? '需代理' : '直连';
+  document.getElementById('sfEnabledText').textContent = document.getElementById('sfEnabled').classList.contains('on') ? '启用' : '禁用';
+  document.getElementById('sfCrawlText').textContent  = document.getElementById('sfCrawl').classList.contains('on')  ? '转 deep_search_crawl' : 'Wigolo 检索';
+}
+function channelOpenDrawer(backend,id){
+  const s = channelFind(backend,id); if(!s) return;
+  const isWigolo = backend==='wigolo';
+  CHANNEL.selectedId=id; CHANNEL.editingId=id; CHANNEL.isNew=false;
+  document.getElementById('sfName').value = s.name || '';
+  document.getElementById('sfDomain').value = s.domain || '';
+  channelRenderCategorySelect(s.category);
+  document.getElementById('sfPlatform').value = s.platform || 'zhihu';
+  document.getElementById('sfDesc').value = s.description || s.desc || '';
+  document.getElementById('sfPriority').value = s.priority ?? 50;
+  document.getElementById('sfQueryHint').value = s.queryHint || '';
+  channelSetSwitch('sfProxy', !!s.proxy, 'sfProxyText');
+  channelSetSwitch('sfEnabled', !!s.enabled, 'sfEnabledText');
+  channelSetSwitch('sfCrawl', !!s.crawl, 'sfCrawlText');
+  channelShow('sfDomainWrap', isWigolo);
+  channelShow('sfCategoryWrap', isWigolo);
+  channelShow('sfPlatformWrap', !isWigolo);
+  channelShow('sfDescWrap', isWigolo);
+  channelShow('sfPriorityWrap', isWigolo);
+  channelShow('sfQueryHintWrap', isWigolo);
+  channelShow('sfProxyWrap', isWigolo);
+  channelShow('sfCrawlWrap', isWigolo);
+  // crawl=true：DOMAIN/CATEGORY/QUERYHINT/PROXY 对 mediacrawler 无意义，锁死（保留 PRIORITY 供 catalogBlock 排序）
+  channelApplyCrawlLock();
+  document.getElementById('channelDrawerTitle').textContent = s.name || id;
+  document.getElementById('channelDrawerPill').textContent = s.enabled ? '启用' : '禁用';
+  document.getElementById('sfSaveHint').textContent = '';
+  document.getElementById('sfDrawerMeta').style.display = 'block';
+  document.getElementById('sfMetaId').textContent = s.id;
+  document.getElementById('sfMetaBackend').textContent = isWigolo ? 'wigolo' : 'mediacrawler';
+  channelSwitchText();
+  channelRender();
+  document.getElementById('channelDrawerBackdrop').classList.add('open');
+  document.getElementById('channelDrawer').classList.add('open');
+}
+function channelCloseDrawer(){
+  CHANNEL.selectedId=null; CHANNEL.editingId=null; CHANNEL.isNew=false; CHANNEL.draftBackend=null;
+  document.getElementById('channelDrawerBackdrop').classList.remove('open');
+  document.getElementById('channelDrawer').classList.remove('open');
+  channelRender();
+}
+function channelToggleSwitch(id){
+  document.getElementById(id).classList.toggle('on'); channelSwitchText();
+  if(id==='sfCrawl') channelApplyCrawlLock();  // 开关 crawl 即时锁/解锁 DOMAIN 等字段
+}
+// crawl=true（登录态社媒站）：DOMAIN/CATEGORY/QUERYHINT/PROXY 对 mediacrawler 无意义 → 锁死清空；
+// PRIORITY 保留（阶段3 crawl 分段按它排序）。用户定稿 2026-11-08。
+function channelApplyCrawlLock(){
+  const crawlOn = document.getElementById('sfCrawl').classList.contains('on');
+  const dom=document.getElementById('sfDomain'), cat=document.getElementById('sfCategory'),
+        qh=document.getElementById('sfQueryHint');
+  const lock=(el)=>{ if(!el) return; el.disabled=crawlOn; if(crawlOn) el.value=''; el.placeholder=crawlOn?'（登录态社媒站 · 无需此项）':(el===dom?'example.com':''); };
+  lock(dom); lock(cat); lock(qh);
+  const px=document.getElementById('sfProxy'); if(px){ px.classList.remove('on'); px.style.pointerEvents=crawlOn?'none':''; px.style.opacity=crawlOn?.45:''; }
+  const pxT=document.getElementById('sfProxyText'); if(pxT) pxT.textContent=crawlOn?'—':(px&&px.classList.contains('on')?'走代理':'直连');
+}
+function channelUuid(){return crypto.randomUUID?crypto.randomUUID():'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0;return(c==='x'?r:(r&0x3|0x8)).toString(16)})}
+function channelAdd(backend){
+  if(backend!=='wigolo') return;  // mediacrawler 平台由后端爬虫模块决定
+  CHANNEL.draftBackend='wigolo';
+  CHANNEL.selectedId=null; CHANNEL.editingId=null; CHANNEL.isNew=true;
+  document.getElementById('sfName').value='';
+  document.getElementById('sfDomain').value='';
+  channelRenderCategorySelect('');
+  document.getElementById('sfDesc').value='';
+  document.getElementById('sfPriority').value=50;
+  document.getElementById('sfQueryHint').value='';
+  channelSetSwitch('sfProxy',false,'sfProxyText');
+  channelSetSwitch('sfEnabled',false,'sfEnabledText');
+  channelSetSwitch('sfCrawl',false,'sfCrawlText');
+  channelShow('sfPlatformWrap',false);
+  channelShow('sfPriorityWrap',true); channelShow('sfQueryHintWrap',true);
+  channelShow('sfProxyWrap',true); channelShow('sfCrawlWrap',true);
+  channelShow('sfDomainWrap',true); channelShow('sfCategoryWrap',true); channelShow('sfDescWrap',true);
+  document.getElementById('channelDrawerTitle').textContent='新增站点';
+  document.getElementById('channelDrawerPill').textContent='未保存';
+  document.getElementById('sfSaveHint').textContent='';
+  document.getElementById('sfDrawerMeta').style.display='block';
+  document.getElementById('sfMetaId').textContent=channelUuid();
+  document.getElementById('sfMetaBackend').textContent='wigolo';
+  channelSwitchText();
+  document.getElementById('channelDrawerBackdrop').classList.add('open');
+  document.getElementById('channelDrawer').classList.add('open');
+}
+async function channelSaveDrawer(){
+  const hint=document.getElementById('sfSaveHint');
+  const name=document.getElementById('sfName').value.trim();
+  if(CHANNEL.isNew){
+    if(!CHANNEL.draftBackend){ hint.textContent='没有可保存的内容'; hint.style.color='var(--err)'; return; }
+    const crawlNew=document.getElementById('sfCrawl').classList.contains('on');
+    const domain=crawlNew?'':document.getElementById('sfDomain').value.trim();
+    if(!name||(!crawlNew&&!domain)){ hint.textContent=crawlNew?'NAME 必填':'NAME 和 DOMAIN 必填'; hint.style.color='var(--err)'; return; }
+    const s={ id:document.getElementById('sfMetaId').textContent,
+      name, domain,
+      category:crawlNew?'social':document.getElementById('sfCategory').value.trim(),
+      description:document.getElementById('sfDesc').value.trim(),
+      priority:parseInt(document.getElementById('sfPriority').value)||0,
+      queryHint:crawlNew?'':document.getElementById('sfQueryHint').value.trim(),
+      proxy:crawlNew?false:document.getElementById('sfProxy').classList.contains('on'),
+      enabled:document.getElementById('sfEnabled').classList.contains('on'),
+      crawl:crawlNew };
+    // 阶段2：真 POST /web-catalog/sites
+    try {
+      const r = await fetch('/web-catalog/sites', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ id:s.id, name:s.name, domain:s.domain, category:s.category, description:s.description,
+          priority:s.priority, query_hint:s.queryHint, proxy:s.proxy, enabled:s.enabled, crawl:s.crawl }) });
+      if (!r.ok) { hint.textContent='新增失败 HTTP '+r.status; hint.style.color='var(--err)'; return; }
+      const j = await r.json(); s.id = j.id || s.id;
+    } catch(e) { hint.textContent='新增异常 '+e; hint.style.color='var(--err)'; return; }
+    CHANNEL.wigolo.push(s);
+    CHANNEL.isNew=false; CHANNEL.draftBackend=null; CHANNEL.editingId=s.id; CHANNEL.selectedId=s.id;
+    hint.textContent='已新增'; hint.style.color='var(--ok)';
+    channelRender(); channelOpenDrawer('wigolo', s.id);
+    return;
+  }
+  if(!CHANNEL.editingId){ hint.textContent='没有可保存的内容'; return; }
+  const backend = CHANNEL.wigolo.some(x=>x.id===CHANNEL.editingId) ? 'wigolo' : 'mediacrawler';
+  const s = channelFind(backend,CHANNEL.editingId); if(!s) return;
+  const isWigolo = backend==='wigolo';
+  s.name=name;
+  const payload = { name };
+  if(isWigolo){
+    s.priority=parseInt(document.getElementById('sfPriority').value)||0;
+    s.crawl=document.getElementById('sfCrawl').classList.contains('on');
+    // crawl=true：DOMAIN/CATEGORY/QUERYHINT/PROXY 强制清空锁死（PRIORITY 保留供排序）
+    if(s.crawl){
+      s.domain=''; s.category='social'; s.queryHint=''; s.proxy=false;
+    } else {
+      s.domain=document.getElementById('sfDomain').value.trim();
+      s.category=document.getElementById('sfCategory').value.trim();
+      s.queryHint=document.getElementById('sfQueryHint').value.trim();
+      s.proxy=document.getElementById('sfProxy').classList.contains('on');
+    }
+    s.description=document.getElementById('sfDesc').value.trim();
+    Object.assign(payload, { domain:s.domain, category:s.category, description:s.description,
+      priority:s.priority, query_hint:s.queryHint, proxy:s.proxy, crawl:s.crawl });
+  }
+  s.enabled=document.getElementById('sfEnabled').classList.contains('on');
+  payload.enabled = s.enabled;
+  if(isWigolo){
+    // 阶段2：真 PUT /web-catalog/sites/:id
+    try {
+      const r = await fetch('/web-catalog/sites/'+encodeURIComponent(s.id), { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+      if (!r.ok) { hint.textContent='保存失败 HTTP '+r.status; hint.style.color='var(--err)'; channelRender(); return; }
+    } catch(e) { hint.textContent='保存异常 '+e; hint.style.color='var(--err)'; channelRender(); return; }
+  }
+  hint.textContent='已保存'; hint.style.color='var(--ok)';
+  channelRender();
+}
+async function channelDeleteSite(){
+  if(!CHANNEL.editingId || CHANNEL.isNew) return;
+  if(!confirm('删除该站点？')) return;
+  const backend = CHANNEL.wigolo.some(x=>x.id===CHANNEL.editingId) ? 'wigolo' : 'mediacrawler';
+  if(backend==='wigolo'){
+    try { await fetch('/web-catalog/sites/'+encodeURIComponent(CHANNEL.editingId), { method:'DELETE' }); } catch(e) { console.error('delete err', e); }
+    CHANNEL.wigolo = CHANNEL.wigolo.filter(s=>s.id!==CHANNEL.editingId);
+  }
+  channelCloseDrawer();
+}
+</script>
 </body>
 </html>

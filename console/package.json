@@ -1,5 +1,6 @@
 {
   "name": "dsh-console",
+  "version": "0.9.5",
   "private": true,
   "type": "module",
   "scripts": {

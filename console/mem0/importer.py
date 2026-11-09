@@ -233,7 +233,7 @@ def install_segmentized_search(memory, char_budget: int):
 
     def embed_wrapper(text, memory_action=None):
         batch = getattr(emb, "_seg_batch", None)
-        if (memory_action == "search" and batch and len(text) > char_budget):
+        if (memory_action == "search" and batch):
             groups = _segment_messages(batch, char_budget)
             queries = [_serialize_messages(g) for g in groups]
             state["queries"] = queries
@@ -601,8 +601,8 @@ def run_import(*, root: str, source_db: str, config: dict, memory_factory=None, 
     # 配置读取路径统一：mem0Import 嵌套优先，顶层回退（防止 CLI(嵌套) 与 run_import(顶层) 不一致）
     m0cfg = config.get("mem0Import") or {}
     token_budget = int(m0cfg.get("pendingTokenBudget") or config.get("pendingTokenBudget") or 60000)
-    # embed 按【字符】贪心分批（用户定 2026-11-02：60k 字符，非 60k token）；LLM 仍按 60k token
-    seg_budget = int(m0cfg.get("embedSearchCharBudget") or config.get("embedSearchCharBudget") or 60000)
+    # embed 按【字符】贪心分批（用户定 2026-11-04：30k 字符上限防 8810 MLX 显存超限崩溃）；LLM 仍按 60k token
+    seg_budget = int(m0cfg.get("embedSearchCharBudget") or config.get("embedSearchCharBudget") or 30000)
     user_id = config.get("userId") or os.environ.get("MEM0_USER_ID") or "usr-v3182h5u29"
     agent_id = config.get("agentId") or os.environ.get("MEM0_AGENT_ID") or "agt-v318rqt0be"
 

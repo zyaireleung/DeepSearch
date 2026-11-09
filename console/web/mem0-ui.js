@@ -18,7 +18,7 @@ export function deriveMem0View(status = {}) {
   const current = status.currentBatch
     ? `${status.currentBatch.sessionId} · 批 ${status.currentBatch.part}/${status.currentBatch.partTotal}`
     : '—';
-  // OV 前端一致：顶部游标 = 已解析消息总数 / 全库消息总数（消息级，历史累加）
+  // OV 前端一致：顶部游标 = 已解析消息总数 / 全库消息总数（排除工具调用）（消息级，历史累加）
   const resolved = Number(status.resolvedMessages || 0);
   const total = Number(status.totalMessages || 0);
   // 进度卡显示 = OV 一比一等价（OV index.html:2375-2409：plannedTotal>0 且运行中显示；planned=0/完成后隐藏）。

@@ -52,6 +52,9 @@ export const routes = {
     sync: (base) => `${base}/sync`,
     syncJob: (base, jobId) => `${base}/sync/${encodeURIComponent(jobId)}`,
     sourceCatalog: (base) => `${base}/source-catalog`,
+    /** deep_search_guide 三类动态目录：设备外综合（Wigolo 站点）/ 社媒单发（MediaCrawler 平台）。 */
+    webCatalog: (base) => `${base}/web-catalog`,
+    crawlCatalog: (base) => `${base}/crawl-catalog`,
     /** agent/pre-step 记忆召回：Console 侧唯一实现（evokeRecall），插件薄转发，绝不本地重造判定/检索。 */
     evokeRecall: (base) => `${base}/api/evoke/recall`,
 };

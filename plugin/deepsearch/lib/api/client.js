@@ -23,6 +23,10 @@ export class ApiClient {
     /** 端口保护拒绝原因（非 null = 沙盒/开发模式下指向生产 :6600，工具调用返回 GUARD_REJECTED）。 */
     guardRejected = null;
     timeoutMs;
+    /** pre-step evoke 钩子用（Console 超时上限）；readonly 别名，不改语义。 */
+    get timeout() {
+        return this.timeoutMs;
+    }
     constructor(opts = {}) {
         const cfg = opts.config ?? loadConfigFile(opts.configPath);
         this.base = consoleBaseUrl(opts.env, cfg);
@@ -88,6 +92,14 @@ export class ApiClient {
     /** 只读源目录（Task 6）：同 timeout + production guard；绝不写 Console。 */
     sourceCatalog() {
         return this.call("GET", routes.sourceCatalog(this.base));
+    }
+    /** deep_search_guide 设备外综合目录（Wigolo 站点）：同 timeout+guard，只读。 */
+    webCatalog() {
+        return this.call("GET", routes.webCatalog(this.base));
+    }
+    /** deep_search_guide 社媒单发目录（MediaCrawler 平台）：同 timeout+guard，只读。 */
+    crawlCatalog() {
+        return this.call("GET", routes.crawlCatalog(this.base));
     }
     sync(req) {
         return this.call("POST", routes.sync(this.base), req);

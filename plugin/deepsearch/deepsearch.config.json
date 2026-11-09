@@ -26,5 +26,9 @@
     "p1Base": 900,
     "p1Max": 1300,
     "p2Max": 400
-  }
+  },
+  "gatewayUrl": "http://localhost:5678",
+  "gatewayTokenFile": ".gateway-token",
+  "mediacrawlerRoot": "/Users/zyaire/MediaCrawler",
+  "python": "python3"
 }
