@@ -2,7 +2,7 @@
 
 DeepSearch 控制台（`127.0.0.1:6600`，`DEEPSEARCH_CONSOLE_PORT` 可改）：把 **dsh 对话/记忆 → 四源检索 → 结果导航/全文/同步** 这条链路包成一个可视化控制台，并承担 **OV 批级 commit 导入**。
 
-版本：**V_0.8.0**（2026-11-02，mem0 导入批数不再回退 + 暂停直接生效 + 停止取消队列 + 手动导入死锁修复）。
+版本：**V_0.9.5**（2026-11-09，前端"渠道"功能 + 动态 catalogBlock 扩充网络检索站点，配套插件 0.5.0 本地/网络多轮自主循环反思检索）。
 
 ## 形态
 
@@ -34,6 +34,14 @@ DeepSearch 控制台（`127.0.0.1:6600`，`DEEPSEARCH_CONSOLE_PORT` 可改）：
 - **强锚点候选管线**：`anchor-resolve.js` 解析 query 锚点（resolved / technical / ambiguous / unresolved；仅 resolved + technical 进 strong 数组），检索对象不漂移保护。
 - 语义分：`semanticConf`（余弦置信），禁加权，前级同才看后级。
 
+## 渠道（V_0.9.5，配套插件 0.5.0）
+
+前端新增"渠道"板块，为插件的**本地/网络多轮自主循环反思检索**提供站点目录。插件经 `deferContext` 把 catalogBlock 作来源快照排到检索结果后，schema 仍由 DSH 原生注册表呈现。
+
+- **web 渠道**：Wigolo 多站点公开网页目录（Bing/Google/GitHub/ComfyUI/Civitai 等），带类别/优先级/是否需代理/检索提示，供 `deep_search_web` 按_claim 的 `required_evidence` 选站。
+- **crawl 渠道**：登录态社媒抓取平台目录（知乎/B站/微博/抖音/小红书/快手），供 `deep_search_crawl` 单平台定向抓取。
+- **路由**：`/web-catalog`、`/crawl-catalog`、`/web-catalog/sites`（`server.js` 白名单放行）；数据表 `web_sites` / `crawl_platforms`。
+
 ## 检索 API
 
 | 方法 | 路径 | 说明 |
@@ -44,6 +52,7 @@ DeepSearch 控制台（`127.0.0.1:6600`，`DEEPSEARCH_CONSOLE_PORT` 可改）：
 | GET | `/status` | 四源健康真实探测（mem0/OV/表 + wiki 块） |
 | GET | `/source-catalog` | 只读源目录（固定源 + 启用/就绪 Wiki 资产；绝不写注册表） |
 | GET | `/source-stats` | 只读源统计（端口/数据量/上次同步，真实来源） |
+| GET | `/web-catalog` · `/crawl-catalog` · `/web-catalog/sites` | 渠道目录（web 站点 / 社媒抓取平台），供插件动态 catalogBlock（V_0.9.5） |
 | POST | `/sync` | 同步（`target`: wiki / session / all；`dryRun` 默认 true） |
 | GET | `/sync/:jobId` | 同步任务结果 |
 
