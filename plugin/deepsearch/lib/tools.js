@@ -12,7 +12,7 @@
  * 文案（description/param.*）全部取自 prompts/zh/tools.md（经 loader 校验的 SlotMap），不再硬编码。
  */
 import { ApiClientError } from "./api/client.js";
-import { renderSourceRouting, renderReadGuide, resolveGuideRoute, extractToolGuide, selectNextTools, renderNextToolGuidance, validateSourceCatalog, validateWebCatalog, validateCrawlCatalog, renderSourceCatalog, renderWebCatalog, renderCrawlCatalog, sourceCatalogFallback, webCatalogFallback, crawlCatalogFallback } from "./guidance.js";
+import { renderSourceRouting, renderReadGuide, resolveGuideRoute, extractToolGuide, extractNextSourceGuide, selectNextTools, renderNextToolGuidance, validateSourceCatalog, validateWebCatalog, validateCrawlCatalog, renderSourceCatalog, renderWebCatalog, renderCrawlCatalog, sourceCatalogFallback, webCatalogFallback, crawlCatalogFallback, normalizeRoutingSource, resultObject } from "./guidance.js";
 import { runCli } from "./webResearch.js";
 import { randomUUID } from "node:crypto";
 const CONFLICT = { code: "PARAM_CONFLICT", message: "method 与 sources/precision 互斥", hint: "`method` 与 `sources`/`precision` 互斥，二选一" };
@@ -46,12 +46,28 @@ export async function deepSearch(client, args, sourceRoutingText) {
     const hitSources = [...new Set(page.results.map((r) => r.source))];
     return { ...page, routing: renderSourceRouting(sourceRoutingText, hitSources) };
 }
-/** § 9.2 deep_search_next：方向导航（与携带轴正交）；id 必填 */
-export async function deepSearchNext(client, args) {
+const OV_ONLY_DIRECTIONS = ["tree", "list", "glob", "grep"];
+/** 从结果 id 前缀推导来源（ov_context_find/search 归一化为 ov_context；mem0/ov_session/wiki 原样） */
+function inferNextSource(id) {
+    const i = id.indexOf(":");
+    const s = i > 0 ? id.slice(0, i) : "";
+    return s.startsWith("ov_context") ? "ov_context" : s;
+}
+/** § 9.2 deep_search_next：方向导航（与携带轴正交）；id 必填。
+ *  按数据源分流：
+ *   - 参数层硬拒绝——ov 专用方向（tree/list/glob/grep）仅 ov_context 源可用，wiki/mem0/ov_session 传这些方向在 execute 层直接拒绝（不调 Console）；
+ *   - 按来源分段指引——调用时 id 前缀已定 source，提取 tools-guide.md 的 `## deep_search_next:<source>` 段随结果返回（agent 只看到当前源可用的方向/参数）。
+ */
+export async function deepSearchNext(client, args, toolsGuide) {
     if (!args.id || typeof args.id !== "string")
         throw new ApiClientError("INVALID_REQUEST", "id 必填", "提供当前结果 id 再导航");
+    const source = inferNextSource(args.id);
+    // 参数层硬拒绝：ov_context 专用方向不可用于其他源（杜绝 ov 参数被 wiki 等源结果调用）
+    if (OV_ONLY_DIRECTIONS.includes(args.direction) && source !== "ov_context") {
+        return { available: false, reason: `方向 ${args.direction} 仅 ov_context 源支持，当前结果源是 ${source || "未知"}` };
+    }
     if (!args.direction)
-        throw new ApiClientError("INVALID_REQUEST", "direction 必填", "提供 direction（up/across/back/global/root/auto）");
+        throw new ApiClientError("INVALID_REQUEST", "direction 必填", "提供 direction（关系导航 up/across/back/global/root/auto；ov_context 源另有 tree/list/glob/grep）");
     const res = await client.next({
         id: args.id,
         direction: args.direction,
@@ -60,11 +76,15 @@ export async function deepSearchNext(client, args) {
         visited: args.visited,
         origin: args.origin,
         query: args.query,
+        pattern: args.pattern,
         params: args.params,
         inline: args.inline,
         limit: args.limit,
     });
-    return res.next;
+    const next = res.next;
+    // 按来源提取导航指引段（source 此刻已确定），随结果返回供 agent 参考；无对应段则不虚构
+    const sourceGuide = toolsGuide ? extractNextSourceGuide(toolsGuide, source) : undefined;
+    return sourceGuide ? { ...next, guide: sourceGuide } : next;
 }
 /** § 9.2+ deep_search_read：读取已返回结果全文（ov_session/wiki 闭环截断；mem0/ov_context 诚实说明）。id 必填。
  *  sourceRoutingText：非空时附 read 后兜底提示（脱离前置检索直接调用场景），不重复整套 routing。
@@ -129,7 +149,12 @@ function withNextGuidance(currentTool, toolsGuide, execute, resultDecisionText) 
         const nextTools = selectNextTools(currentTool, result);
         if (nextTools.length === 0)
             return result;
-        const text = renderNextToolGuidance(toolsGuide, nextTools);
+        // deep_search 后按本轮可展开来源裁剪 deep_search_next 小节，只呈现真正命中的源方向/参数
+        const value = resultObject(result);
+        const sources = Array.isArray(value?.results)
+            ? [...new Set(value.results.map((r) => normalizeRoutingSource(r?.source)).filter(Boolean))]
+            : undefined;
+        const text = renderNextToolGuidance(toolsGuide, nextTools, sources);
         if (!exec?.deferContext)
             throw new Error("ToolRunContext.deferContext unavailable");
         await exec.deferContext(deferredSnapshot(text, "next-method", { currentTool, nextTools }));
@@ -183,16 +208,17 @@ export function buildTools(client, texts, sourceRoutingText, webRoutingText, web
     }, withNextGuidance("deep_search", texts["__toolsGuide"], (a) => deepSearch(client, a, sourceRoutingText), texts["__resultDecision"]));
     const nextTool = tool("deep_search_next", texts, {
         id: prop("string", texts["deep_search_next.param.id"], { required: true }),
-        direction: prop("string", texts["deep_search_next.param.direction"], { required: true, enum: ["up", "across", "back", "global", "root", "auto"] }),
+        direction: prop("string", texts["deep_search_next.param.direction"], { required: true, enum: ["up", "across", "back", "global", "root", "auto", "tree", "list", "glob", "grep"] }),
         step: prop("string", texts["deep_search_next.param.step"], { enum: ["S1", "S2", "S3"] }),
         method: prop("string", texts["deep_search_next.param.method"]),
         visited: prop("array", texts["deep_search_next.param.visited"], { items: { type: "string" } }),
         origin: prop("string", texts["deep_search_next.param.origin"]),
         query: prop("string", texts["deep_search_next.param.query"]),
+        pattern: prop("string", texts["deep_search_next.param.pattern"]),
         params: prop("object", texts["deep_search_next.param.params"]),
         inline: prop("boolean", texts["deep_search_next.param.inline"], { default: false }),
         limit: prop("integer", texts["deep_search_next.param.limit"]),
-    }, withNextGuidance("deep_search_next", texts["__toolsGuide"], (a) => deepSearchNext(client, a), texts["__resultDecision"]));
+    }, withNextGuidance("deep_search_next", texts["__toolsGuide"], (a) => deepSearchNext(client, a, texts["__toolsGuide"]), texts["__resultDecision"]));
     const statusTool = tool("deep_search_status", texts, {}, withNextGuidance("deep_search_status", texts["__toolsGuide"], () => deepSearchStatus(client), texts["__resultDecision"]));
     const readTool = tool("deep_search_read", texts, {
         id: prop("string", texts["deep_search_read.param.id"] ?? "必填字符串；要读取全文的 deep_search 结果 id", { required: true }),

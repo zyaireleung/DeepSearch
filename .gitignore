@@ -71,3 +71,7 @@ console/llm-wiki-asset/entities/
 # Python bytecode cache
 __pycache__/
 *.pyc
+.gateway-token
+backup/
+prod-backup-*
+web-research/scripts/.state/

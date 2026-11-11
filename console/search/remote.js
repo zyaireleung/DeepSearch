@@ -44,6 +44,54 @@ export async function ovFind(ovBaseUrl, apiKey, { query, targetUri, limit = 20, 
   };
 }
 
+/** OV GET helper（fs/tree、fs/ls 等只读查询） */
+async function ovGet(url, apiKey, timeoutMs = 8000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, {
+      method: "GET",
+      headers: apiKey ? { "X-API-Key": apiKey } : {},
+      signal: ctrl.signal,
+    });
+    return { status: r.status, json: await r.json().catch(() => null) };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/** OV fs/tree（GET /api/v1/fs/tree）→ 结构化目录树（deep_search_next direction=tree） */
+export async function ovFsTree(ovBaseUrl, apiKey, { uri = "viking://", levelLimit = 3, nodeLimit = 200, includeAbstract = false, timeoutMs = 8000 } = {}) {
+  const qs = new URLSearchParams({ uri, level_limit: String(levelLimit), node_limit: String(nodeLimit), include_abstract: String(includeAbstract) });
+  const { status, json } = await ovGet(`${ovBaseUrl}/api/v1/fs/tree?${qs}`, apiKey, timeoutMs);
+  if (status !== 200 || !json) return { ok: false, status, error: json?.detail || `HTTP ${status}` };
+  return { ok: true, status, data: json.result ?? json };
+}
+
+/** OV fs/ls（GET /api/v1/fs/ls）→ 目录列表（deep_search_next direction=list） */
+export async function ovFsLs(ovBaseUrl, apiKey, { uri = "viking://", recursive = false, offset = 0, limit = 100, sortBy, sortOrder, timeoutMs = 8000 } = {}) {
+  const qs = new URLSearchParams({ uri, recursive: String(recursive), offset: String(offset), limit: String(limit) });
+  if (sortBy) qs.set("sort_by", sortBy);
+  if (sortOrder) qs.set("sort_order", sortOrder);
+  const { status, json } = await ovGet(`${ovBaseUrl}/api/v1/fs/ls?${qs}`, apiKey, timeoutMs);
+  if (status !== 200 || !json) return { ok: false, status, error: json?.detail || `HTTP ${status}` };
+  return { ok: true, status, data: json.result ?? json };
+}
+
+/** OV search/glob（POST /api/v1/search/glob）→ 按 pattern 找文件名（deep_search_next direction=glob） */
+export async function ovSearchGlob(ovBaseUrl, apiKey, { pattern, uri = "viking://", nodeLimit = 100, timeoutMs = 8000 } = {}) {
+  const { status, json } = await postJson(`${ovBaseUrl}/api/v1/search/glob`, { pattern, uri, node_limit: nodeLimit }, { "X-API-Key": apiKey }, timeoutMs);
+  if (status !== 200 || !json) return { ok: false, status, error: json?.detail || `HTTP ${status}` };
+  return { ok: true, status, data: json.result ?? json };
+}
+
+/** OV search/grep（POST /api/v1/search/grep）→ 按 regex 搜内容（deep_search_next direction=grep） */
+export async function ovSearchGrep(ovBaseUrl, apiKey, { pattern, uri = "viking://", caseInsensitive = false, nodeLimit = 20, timeoutMs = 8000 } = {}) {
+  const { status, json } = await postJson(`${ovBaseUrl}/api/v1/search/grep`, { pattern, uri, case_insensitive: caseInsensitive, node_limit: nodeLimit }, { "X-API-Key": apiKey }, timeoutMs);
+  if (status !== 200 || !json) return { ok: false, status, error: json?.detail || `HTTP ${status}` };
+  return { ok: true, status, data: json.result ?? json };
+}
+
 /** mem0 8915 search（POST /search {query,limit} → {ok,results}） */
 export async function mem0Search(mem0Url, { query, limit = 20, timeoutMs = 4000 } = {}) {
   const { status, json } = await postJson(`${mem0Url}/search`, { query, limit }, {}, timeoutMs);

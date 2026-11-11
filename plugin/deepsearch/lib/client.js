@@ -1,31 +1,39 @@
-// deep-search — client 折叠注入渲染（照抄 tdai-memory-inject v0.2.5+ 的折叠器）
-// 背景：2026-11-03 生产停用 tdai-memory-inject（deep-search 接管唤起注入）后，胶囊折叠消失——
-//   折叠 UI 是 tdai 的 client.js 做的，deep-search 之前没有 client 渲染器，注入块平铺展开。
-// 本文件把 tdai 的折叠器原样搬来（纯 DOM 扫描 + MutationObserver 保活，不依赖快照/React dock），
-//   仅改 ModuleLoader id 与 CSS tag 前缀（tdai-memory-inject → deep-search），避免与遗留 tdai 胶囊 tag 冲突。
-// 机制：扫 [data-chat-flow] 里含 <inject_recall> / <tdai_memory_recall> 的 user 行 → foldOne 折叠成胶囊
-//   → MutationObserver 保活。deep-search pre-step 注入的 snapshot user 消息 content=[{type:"text",text:block}]，
-//   block 即 <inject_recall> 信封，被 collectDomGroups 扫到即折叠。
+// deep-search — client 折叠注入渲染（meow dock 架构版 2026-11-10）
+// 根因：context 节点被 isVisibleChatNode 过滤不进 DOM，纯 DOM 扫描永远找不到。
+// 修复：照 meow 机制挂 dock → useChat 取快照 → computeInjectionGroups 从 node store 读 context 节点 → 自建 anchor 渲染。
 
-// ── 顶层纯函数（不依赖 React/DOM；node 可测，浏览器由 factory 闭包复用）──
+// ── 顶层纯函数（不依赖 React/DOM；node 可测）──
 var INJ_MARKERS = ["<tdai_memory_recall", "<inject_recall"];
 var INJ_ENDS = ["</tdai_memory_recall>", "</inject_recall>"];
 var TIME_ATTR = "data-tdai-time";
-var CAPSULE_DEEP_SEP = "── DeepSearch 命中以下历史记忆，供参考 ──";
+var CAPSULE_DEEP_SEP = "\u2500\u2500 DeepSearch \u547D\u4E2D\u4EE5\u4E0B\u5386\u53F2\u8BB0\u5FC6\uFF0C\u4F9B\u53C2\u8003 \u2500\u2500";
 var CAPSULE_TITLE_LEGACY = "已\u6CE8\u5165TencentDB\u8BB0\u5FC6\uFF08\u5173\u952E\u8BCD\u547D\u4E2D\uFF09";
 var CAPSULE_TITLE_HAR = "已\u6CE8\u5165 Harness \u8BF4\u660E";
 var CAPSULE_TITLE_DEEP = "已\u6CE8\u5165 DeepSearch \u8BB0\u5FC6";
 var CAPSULE_TITLE_BOTH = "已\u6CE8\u5165 Harness \u548C\u8BB0\u5FC6";
+// 无信封时按内容 marker 判标题（meow promptVariantHead 同款思路：认内容头特征，不认信封 tag）
+function hasDeepMarker(text) { return String(text || "").indexOf(CAPSULE_DEEP_SEP) !== -1; }
+function hasHarnessMarker(text) { return /Harness\s*说明|Harness\s*规则/.test(String(text || "")); }
 
-function capsuleTitle(injectedText) {
+function capsuleTitle(injectedText, titleOverride) {
+  // meta.title 优先（Console harnessAssemble 算好的权威标题，摘信封后 harness 段无 marker 只能靠它）
+  if (titleOverride) {
+    if (titleOverride === CAPSULE_TITLE_HAR) return CAPSULE_TITLE_HAR;
+    if (titleOverride === CAPSULE_TITLE_DEEP) return CAPSULE_TITLE_DEEP;
+    if (titleOverride === CAPSULE_TITLE_BOTH) return CAPSULE_TITLE_BOTH;
+  }
   var t = String(injectedText || "");
-  if (!/^<inject_recall/.test(t.trimStart())) return CAPSULE_TITLE_LEGACY;
-  var sepAt = t.indexOf(CAPSULE_DEEP_SEP);
-  var hasDeep = sepAt !== -1;
-  var beginTag = "<inject_recall>";
-  var afterTag = t.indexOf(beginTag) === -1 ? "" : t.slice(beginTag.length, sepAt === -1 ? t.length : sepAt);
-  afterTag = afterTag.replace(/<\/inject_recall>[\s\S]*$/, "").replace(/\n/g, "").replace(/\s/g, "").trim();
-  var hasHar = afterTag.length > 0;
+  var hasDeep = hasDeepMarker(t);
+  var hasHar = hasHarnessMarker(t);
+  // 有信封时沿用原信封 tag 内的 harness 段判定（向后兼容旧格式）
+  if (/^<inject_recall/.test(t.trimStart())) {
+    var sepAt = t.indexOf(CAPSULE_DEEP_SEP);
+    var beginTag = "<inject_recall>";
+    var afterTag = t.indexOf(beginTag) === -1 ? "" : t.slice(beginTag.length, sepAt === -1 ? t.length : sepAt);
+    afterTag = afterTag.replace(/<\/inject_recall>[\s\S]*$/, "").replace(/\n/g, "").replace(/\s/g, "").trim();
+    hasHar = afterTag.length > 0;
+    hasDeep = sepAt !== -1;
+  }
   if (hasHar && hasDeep) return CAPSULE_TITLE_BOTH;
   if (hasDeep) return CAPSULE_TITLE_DEEP;
   if (hasHar) return CAPSULE_TITLE_HAR;
@@ -33,6 +41,17 @@ function capsuleTitle(injectedText) {
 }
 
 function blocksToText(blocks) { return (blocks || []).map((b) => (b && b.text != null ? b.text : "")).join("\n").trim(); }
+
+// 从 node source.sections 读 __meta__（meow extractMetaFromSections 同款）
+function extractMeta(source) {
+  if (!source || !Array.isArray(source.sections)) return null;
+  for (var i = 0; i < source.sections.length; i++) {
+    if (source.sections[i] && source.sections[i].name === "__meta__") {
+      try { return JSON.parse(source.sections[i].text || "{}"); } catch (e) { return null; }
+    }
+  }
+  return null;
+}
 
 function splitInjection(full) {
   var start = -1, end = -1;
@@ -106,6 +125,7 @@ function safeEscape(value) {
   return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
+// ── 浏览器侧（ModuleLoader factory）──
 if (typeof window === "undefined" || !window.__ModuleLoader__) {
   if (typeof module !== "undefined") module.exports = { blocksToText, splitInjection, stripTrailingClock, formatClock, mergeGroups, resolveClockText, planPromptActions, safeEscape, capsuleTitle };
 } else {
@@ -113,7 +133,6 @@ if (typeof window === "undefined" || !window.__ModuleLoader__) {
     id: "deep-search",
     factory: (require) => {
       var module = { exports: {} };
-      var exports = module.exports;
       var React = require("react");
 
       var FOLDED_ATTR = "data-tdai-folded";
@@ -168,27 +187,99 @@ if (typeof window === "undefined" || !window.__ModuleLoader__) {
         "[" + COPY_ATTR + "]:hover::after { opacity: 1; }"
       ].join("\n");
 
+      // ── source 识别 ──
+      var DS_SOURCE_KIND = "deep-search";
+      var DS_PLUGIN_NAME = "deep-search";
+      function isDeepSearchSource(source) {
+        if (source === null || typeof source !== "object") return false;
+        return source.kind === DS_SOURCE_KIND ||
+               (source.kind === "plugin" && source.plugin === DS_PLUGIN_NAME);
+      }
+
+      // ── node store 遍历 ──
+      function chatKeyOrder(snapshot) {
+        var chat = snapshot && snapshot.chat;
+        if (!chat) return [];
+        var keys = [];
+        var seen = new Set();
+        if (Array.isArray(chat.order)) {
+          for (var i = 0; i < chat.order.length; i++) {
+            if (!seen.has(chat.order[i])) { seen.add(chat.order[i]); keys.push(chat.order[i]); }
+          }
+        }
+        var store = chat.nodes;
+        if (store && typeof store.values === "function") {
+          var extra = store.values();
+          for (var it = extra.next ? extra.next() : { done: true, value: undefined }; !it.done; it = extra.next()) {
+            var node = it.value;
+            var k = node && node.key;
+            if (k !== undefined && !seen.has(k)) { seen.add(k); keys.push(k); }
+          }
+        }
+        return keys;
+      }
+
+      function contextText(node) {
+        return blocksToText(node.data && node.data.content || []);
+      }
+
+      // ── computeInjectionGroups（meow 双路径：context + user）──
       function computeInjectionGroups(snapshot) {
         var groups = [];
-        var chat = snapshot && snapshot.chat;
-        if (!chat || !chat.order || chat.order.length === 0) return groups;
-        for (var i = 0; i < chat.order.length; i++) {
-          var key = chat.order[i];
+        if (!snapshot || !snapshot.chat) return groups;
+        var chat = snapshot.chat;
+        if (!chat.nodes || typeof chat.nodes.get !== "function") {
+          return groups;
+        }
+        var keys = chatKeyOrder(snapshot);
+        for (var i = 0; i < keys.length; i++) {
+          var key = keys[i];
           var node = chat.nodes.get(key);
-          if (!node || node.kind !== "user") continue;
-          var data = node.data;
-          var content = data && data.content;
-          if (!Array.isArray(content) || content.length === 0) continue;
-          if (!content.some((b) => b && b.type === "text")) continue;
-          var used = [];
-          for (var j = 0; j < content.length; j++) {
-            if (content[j] && content[j].type === "text") used.push(content[j].text || "");
+          if (!node) continue;
+
+          // Path 1: context 节点（deep-search snapshot 注入的主路径）
+          if (node.kind === "context") {
+            var source = node.data && node.data.source;
+            if (!isDeepSearchSource(source)) continue;
+            if (source.form !== "snapshot") continue;
+            var meta1 = extractMeta(source);
+            var title1 = meta1 && meta1.title ? meta1.title : void 0;
+            var injText = contextText(node);
+            var sp = splitInjection(injText);
+            if (sp) {
+              groups.push({ id: key, key: key, injectedText: sp.injectedText, userText: sp.userText, meowInjected: sp.meowInjected, time: node.data.time, title: title1 });
+            } else {
+              // 整块当 injectedText（无信封时）
+              groups.push({ id: key, key: key, injectedText: injText, userText: "", meowInjected: false, time: node.data.time, title: title1 });
+            }
+            continue;
           }
-          var full = blocksToText(used);
-          var sp = splitInjection(full);
-          if (sp === null) continue;
-          var time = (data && typeof data.time === "number") ? data.time : void 0;
-          groups.push({ id: key, key: key, injectedText: sp.injectedText, userText: sp.userText, meowInjected: sp.meowInjected, time: time });
+
+          // Path 2: user 节点（meow 同款：deep-search 的胶囊走 user-kind splice，靠 source.plugin 识别）
+          if (node.kind === "user") {
+            var data = node.data;
+            var source2 = data && data.source;
+            // 只折 deep-search 注入的 user-kind 节点；真用户气泡（无 plugin:deep-search）不折
+            if (!source2 || source2.plugin !== "deep-search") continue;
+            var meta2 = extractMeta(source2);
+            var title2 = meta2 && meta2.title ? meta2.title : void 0;
+            var content = data && data.content;
+            if (!Array.isArray(content) || content.length === 0) continue;
+            if (!content.some(function(b) { return b && b.type === "text"; })) continue;
+            var used = [];
+            for (var j = 0; j < content.length; j++) {
+              if (content[j] && content[j].type === "text") used.push(content[j].text || "");
+            }
+            var full = used.join("\n").trim();  // used 已是字符串数组，直接 join
+            var sp2 = splitInjection(full);
+            // 摘信封后：整块当 injectedText（无信封不丢组）
+            var injText2 = sp2 ? sp2.injectedText : full;
+            var userText2 = sp2 ? sp2.userText : "";
+            var time = (data && typeof data.time === "number") ? data.time : void 0;
+            var loc2 = node.location;
+            var turn2 = (loc2 && loc2.turn && typeof loc2.turn.turn === "number") ? loc2.turn.turn : void 0;
+            groups.push({ id: key, key: key, injectedText: injText2, userText: userText2, meowInjected: sp2 ? sp2.meowInjected : false, time: time, title: title2, turn: turn2 });
+          }
         }
         return groups;
       }
@@ -226,6 +317,13 @@ if (typeof window === "undefined" || !window.__ModuleLoader__) {
 
       function foldOne(container, group, expanded, onToggle) {
         var startRow = flowRow(container, group.key);
+        // turn fallback：flow-key 行找不到时，按 data-chat-turn 定位轮次行挂 anchor（meow foldAnchorRow 同款兜底）
+        if (startRow === null && typeof group.turn === "number") {
+          try {
+            var turnRows = container.querySelectorAll('[data-chat-turn="' + group.turn + '"]');
+            if (turnRows.length > 0) startRow = turnRows[0];
+          } catch (e) {}
+        }
         if (startRow === null || startRow.parentElement === null) return;
         var anchor = container.querySelector('[' + ANCHOR_ATTR + '="' + safeEscape(group.id) + '"]');
         if (anchor === null) {
@@ -233,7 +331,8 @@ if (typeof window === "undefined" || !window.__ModuleLoader__) {
           anchor.setAttribute(ANCHOR_ATTR, group.id);
           startRow.parentElement.insertBefore(anchor, startRow);
         }
-        startRow.setAttribute(FOLDED_ATTR, "true");
+        // 只折 flow-key 行本身；turn fallback 挂的轮次行不折（meow ensureAnchor 从不设 FOLDED）
+        if (flowRow(container, group.key) === startRow) startRow.setAttribute(FOLDED_ATTR, "true");
 
         var meowAnchorForRow = container.querySelector('[data-meow-injection-anchor="' + safeEscape(group.id) + '"]');
         if (meowAnchorForRow !== null && meowAnchorForRow.parentElement === anchor.parentElement && meowAnchorForRow.previousElementSibling !== anchor) {
@@ -249,7 +348,7 @@ if (typeof window === "undefined" || !window.__ModuleLoader__) {
         }
         bar.onclick = () => onToggle(group.id);
         var isExpanded = expanded.has(group.id);
-        var label = (isExpanded ? "\u25BE " : "\u25B8 ") + capsuleTitle(group.injectedText);
+        var label = (isExpanded ? "\u25BE " : "\u25B8 ") + capsuleTitle(group.injectedText, group.title);
         if (bar.textContent !== label) bar.textContent = label;
 
         var body = anchor.querySelector(":scope > [" + BODY_ATTR + "]");
@@ -316,52 +415,6 @@ if (typeof window === "undefined" || !window.__ModuleLoader__) {
         if (legacyTime !== null && legacyTime !== timeEl2) legacyTime.remove();
       }
 
-      function applyInjectionFold(groups, domGroups, expanded, onToggle) {
-        var containers = Array.from(document.querySelectorAll("[data-chat-flow]"));
-        if (containers.length === 0) return;
-        for (var c = 0; c < containers.length; c++) {
-          var container = containers[c];
-          var merged = mergeGroups(groups, collectDomGroups(container));
-          for (var g = 0; g < merged.length; g++) foldOne(container, merged[g], expanded, onToggle);
-        }
-      }
-
-      // 主路径：纯 DOM 扫描 + MutationObserver 保活（同 tdai v0.2.8 apply，不依赖快照）
-      function apply(ctx) {
-        var disposers = [];
-        injectStyles();
-        var expanded = new Set();
-        function toggle(id) {
-          if (expanded.has(id)) expanded.delete(id);
-          else expanded.add(id);
-          applyFold();
-        }
-        function applyFold() {
-          var containers = Array.from(document.querySelectorAll("[data-chat-flow]"));
-          for (var c = 0; c < containers.length; c++) {
-            var container = containers[c];
-            var merged = mergeGroups([], collectDomGroups(container));
-            for (var g = 0; g < merged.length; g++) foldOne(container, merged[g], expanded, toggle);
-          }
-        }
-        applyFold();
-        var timer = 0;
-        var observer = new MutationObserver(() => {
-          window.clearTimeout(timer);
-          timer = window.setTimeout(applyFold, 80);
-        });
-        observer.observe(document.body, { childList: true, subtree: true });
-        disposers.push(() => {
-          window.clearTimeout(timer);
-          observer.disconnect();
-        });
-        if (typeof ctx.on === "function") {
-          disposers.push(ctx.on("dispose", () => {
-            for (var d of disposers) { try { d(); } catch {} }
-          }));
-        }
-      }
-
       function injectStyles() {
         var tagId = CSS_TAG;
         for (var stale of Array.from(document.querySelectorAll("style[data-" + tagId + "]"))) stale.remove();
@@ -375,12 +428,173 @@ if (typeof window === "undefined" || !window.__ModuleLoader__) {
         }
       }
 
-      var inject = [];
+      // ── DeepSearchFoldDock 组件（照 meow MemoryFoldDock）──
+      function DeepSearchFoldDock(props) {
+        var sentinelRef = React.useRef(null);
+        var viewRef = React.useRef(null);
+        var expandedRef = React.useRef(new Set());
+        var stateRef = React.useRef({});
+        var chatIdentity = function(chat) { return chat; };
+        var useChat = props && props.useChat;
+        var chatViaHook = typeof useChat === "function" ? useChat(chatIdentity) : void 0;
+        var snapshot = chatViaHook !== void 0 ? { chat: chatViaHook } : void 0;
 
+        var toggle = React.useCallback(function(id) {
+          if (expandedRef.current.has(id)) expandedRef.current.delete(id);
+          else expandedRef.current.add(id);
+          if (viewRef.current) viewRef.current.apply();
+        }, []);
+
+        stateRef.current = { snapshot: snapshot, expanded: expandedRef.current, toggle: toggle };
+
+        React.useLayoutEffect(function() {
+          var el = sentinelRef.current;
+          if (!el) return;
+          var root = el.closest("[data-conversation-scroll]") || document.querySelector("[data-conversation-scroll]") || document.body;
+          var view = mountDeepSearchFoldView(root, function() { return stateRef.current; });
+          viewRef.current = view;
+          return function() {
+            viewRef.current = null;
+            view.dispose();
+          };
+        }, []);
+
+        React.useLayoutEffect(function() {
+          if (viewRef.current) viewRef.current.apply();
+        });
+
+        return React.createElement("span", { ref: sentinelRef, "data-deep-search-dock": "", style: { display: "none" } });
+      }
+
+      // ── mountDeepSearchFoldView（照 meow mountMemoryFoldView）──
+      function mountDeepSearchFoldView(root, read) {
+        var disposed = false;
+        var timer = 0;
+
+        function applyFold() {
+          if (disposed) return;
+          var state = read();
+          var groups = computeInjectionGroups(state.snapshot);
+          var expanded = state.expanded;
+          var toggle = state.toggle;
+
+          var containers = Array.from(root.querySelectorAll("[data-chat-flow]") || []);
+          if (root.matches && root.matches("[data-chat-flow]")) containers.push(root);
+          if (containers.length === 0) return;
+
+          var liveKeys = new Set(groups.map(function(g) { return g.key || g.id; }));
+
+          for (var c = 0; c < containers.length; c++) {
+            var container = containers[c];
+
+            // 移除 stale anchors
+            var staleAnchors = container.querySelectorAll("[" + ANCHOR_ATTR + "]");
+            for (var s = 0; s < staleAnchors.length; s++) {
+              var aid = staleAnchors[s].getAttribute(ANCHOR_ATTR);
+              if (!liveKeys.has(aid)) staleAnchors[s].remove();
+            }
+
+            // 解除不在 liveKeys 的折叠行
+            var foldedRows = container.querySelectorAll("[" + FOLDED_ATTR + '="true"]');
+            for (var f = 0; f < foldedRows.length; f++) {
+              var fkey = foldedRows[f].getAttribute("data-chat-flow-key") || "";
+              if (!liveKeys.has(fkey)) foldedRows[f].removeAttribute(FOLDED_ATTR);
+            }
+
+            // 折叠每个 group
+            for (var g = 0; g < groups.length; g++) {
+              foldOne(container, groups[g], expanded, toggle);
+            }
+          }
+        }
+
+        var observer = new MutationObserver(function() {
+          window.clearTimeout(timer);
+          timer = window.setTimeout(applyFold, 80);
+        });
+        observer.observe(root, { childList: true, subtree: true, characterData: true });
+        applyFold();
+
+        return {
+          apply: applyFold,
+          dispose: function() {
+            disposed = true;
+            window.clearTimeout(timer);
+            observer.disconnect();
+            var containers = Array.from(root.querySelectorAll("[data-chat-flow]") || []);
+            if (root.matches && root.matches("[data-chat-flow]")) containers.push(root);
+            for (var c = 0; c < containers.length; c++) {
+              var anchors = containers[c].querySelectorAll("[" + ANCHOR_ATTR + "]");
+              for (var a = 0; a < anchors.length; a++) anchors[a].remove();
+              var folded = containers[c].querySelectorAll("[" + FOLDED_ATTR + '="true"]');
+              for (var fd = 0; fd < folded.length; fd++) folded[fd].removeAttribute(FOLDED_ATTR);
+            }
+          }
+        };
+      }
+
+      // ── apply(ctx)：挂 dock + 降级 fallback ──
+      function apply(ctx) {
+        var disposers = [];
+        injectStyles();
+
+        var slots = ctx && ctx.slots;
+        if (slots && typeof slots.inject === "function") {
+          // 主路径：挂 dock 到 conversation.composer.dock
+          disposers.push(slots.inject("conversation.composer.dock", function() {
+            return slots.register(
+              { name: "conversation.composer.dock", id: "deep-search", order: 91 },
+              DeepSearchFoldDock
+            );
+          }));
+        } else {
+          // 降级：纯 DOM 扫描（找不到 context 节点，但至少不崩）
+          var expanded = new Set();
+          function toggle(id) {
+            if (expanded.has(id)) expanded.delete(id);
+            else expanded.add(id);
+            applyFallbackFold();
+          }
+          function applyFallbackFold() {
+            var containers = Array.from(document.querySelectorAll("[data-chat-flow]"));
+            for (var c = 0; c < containers.length; c++) {
+              var container = containers[c];
+              var merged = mergeGroups([], collectDomGroups(container));
+              for (var g = 0; g < merged.length; g++) foldOne(container, merged[g], expanded, toggle);
+            }
+          }
+          applyFallbackFold();
+          var timer = 0;
+          var observer = new MutationObserver(function() {
+            window.clearTimeout(timer);
+            timer = window.setTimeout(applyFallbackFold, 80);
+          });
+          observer.observe(document.body, { childList: true, subtree: true });
+          disposers.push(function() {
+            window.clearTimeout(timer);
+            observer.disconnect();
+          });
+        }
+
+        if (typeof ctx.on === "function") {
+          disposers.push(ctx.on("dispose", function() {
+            for (var d of disposers) { try { d(); } catch(e) {} }
+          }));
+        }
+
+        return function() {
+          for (var d of disposers) { try { d(); } catch(e) {} }
+        };
+      }
+
+      var inject = ["slots"];
+
+      // 导出内部函数供测试
       module.exports = {
         name: "deep-search",
         inject: inject,
-        apply: apply
+        apply: apply,
+        _internals: { isDeepSearchSource, chatKeyOrder, contextText, computeInjectionGroups, DeepSearchFoldDock, mountDeepSearchFoldView, foldOne }
       };
       return module.exports;
     }

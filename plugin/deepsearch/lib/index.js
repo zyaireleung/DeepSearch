@@ -94,10 +94,19 @@ function mountEvokePrestep(ctx, client) {
             finally {
                 clearTimeout(t);
             }
-            const block = r?.hit ? String(r.block || "") : "";
-            if (!r?.ok || !block.trim())
+            const rawBlock = r?.hit ? String(r.block || "") : "";
+            if (!r?.ok || !rawBlock.trim())
                 return decision;
-            // 全新构造独立消息，插到最后一条 user 之前（对齐 meow createUserMessage 形态）
+            // 摘信封：剥掉 <inject_recall>…</inject_recall> 外壳，只留内部 block 文本（胶囊改由 source 识别，不靠信封）
+            const block = rawBlock
+                .replace(/^\s*<inject_recall[^>]*>/, "")
+                .replace(/<\/inject_recall>\s*$/, "")
+                .trim();
+            if (!block.trim())
+                return decision;
+            // 路线甲（meow 同款）：splice 进当前 messages，插到最后一条 user 之前。
+            // 节点形态照 meow createUserMessage：kind:"user" + form:"snapshot"，靠 source.plugin=deep-search 被 client 折叠。
+            // 摘掉 <inject_recall> 信封——胶囊不再靠信封触发，改由 source 识别（用户拍板弃信封）。
             const lastUser = [...decision.messages].reverse().find((m) => m?.source?.kind === "user");
             if (lastUser === undefined)
                 return decision;
@@ -106,15 +115,15 @@ function mountEvokePrestep(ctx, client) {
                 role: "user",
                 content: [{ type: "text", text: block }],
                 source: {
-                    kind: "deep-search",
+                    kind: "user",
                     plugin: "deep-search",
                     form: "snapshot",
-                    sections: [{ name: "__meta__", text: JSON.stringify({ kind: "hit", mode: r.mode, query: r.query }) }],
+                    sections: [{ name: "__meta__", text: JSON.stringify({ kind: "hit", mode: r.mode, query: r.query, title: r.title || "" }) }],
                 },
             };
             const rewritten = [...decision.messages];
             rewritten.splice(rewritten.indexOf(lastUser), 0, evokeMsg);
-            ctx.logger?.info?.(`deep-search: evoke mode=${r.mode} query=${JSON.stringify(r.query)} capsule=${block.length}chars injected`);
+            ctx.logger?.info?.(`deep-search: evoke mode=${r.mode} query=${JSON.stringify(r.query)} capsule=${block.length}chars spliced as user-kind snapshot`);
             return { ...decision, messages: rewritten };
         }
         catch (e) {

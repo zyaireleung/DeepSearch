@@ -282,11 +282,42 @@ export function extractToolGuide(text, toolName) {
     const body = parseSourceRouting(text).get(toolName)?.trim();
     return body ? `## ${toolName}\n\n${body}` : undefined;
 }
+/**
+ * 按**数据源**提取 deep_search_next 的导航指引小节（`## deep_search_next:<source>`）。
+ * 与通用 `## deep_search_next`（调用方法，deep_search 后引导时注入）分层：
+ *   - 通用段：讲 id/direction 必填等跨来源共性，由 withNextGuidance 在前置检索后注入；
+ *   - 来源段：讲该源可用方向/参数（ov_context 有 tree/list/glob/grep+pattern，wiki 只有 up/across/back/global），
+ *     由 deep_search_next execute 在**调用时**按 id 前缀的 source 提取并随结果返回——此刻 source 已确定。
+ * 找不到对应来源段则返回 undefined（不虚构；mem0/ov_session 等扁平源可不设段）。
+ */
+export function extractNextSourceGuide(text, source) {
+    if (!text || !source)
+        return undefined;
+    // 数据源方向收在通用段 `## deep_search_next` 的【沿什么展开】五级子块（`##### **<source>**：`）里，
+    // 不再是独立 `## deep_search_next:<source>` 段。本函数取该段，再按 source 切出对应五级子块。
+    const section = parseSourceRouting(text).get("deep_search_next");
+    if (!section)
+        return undefined;
+    const blocks = new Map();
+    let current = null;
+    const buf = [];
+    const flush = () => { if (current) blocks.set(current, buf.join("\n").trim()); };
+    for (const raw of section.split(/\r?\n/)) {
+        const m = raw.match(/^#####\s+\*\*(.+?)\*\*[：:]/); // 形如 `##### **ov_context**：`
+        if (m) { flush(); current = m[1].trim(); buf.length = 0; }
+        else if (current && /^###\s/.test(raw)) { flush(); current = null; } // 三级小节（展开后怎么走等）结束五级块
+        else if (current) { buf.push(raw); }
+    }
+    flush();
+    const body = blocks.get(source);
+    return body ? `##### **${source}**\n\n${body}` : undefined;
+}
 const NEXT_TOOL_ORDER = [
     "deep_search_next", "deep_search_read", "deep_search_status", "deep_search_sync",
     "deep_search_step", "deep_search_reflect", "deep_search_report",
 ];
-function resultObject(value) {
+/** 解析工具结果为对象（字符串/对象；数组与非对象返回 undefined）。 */
+export function resultObject(value) {
     if (typeof value === "string") {
         try {
             value = JSON.parse(value);
@@ -334,11 +365,40 @@ export function selectNextTools(currentTool, result) {
     }
     return NEXT_TOOL_ORDER.filter((name) => selected.has(name));
 }
-export function renderNextToolGuidance(toolsGuide, toolNames) {
+export function renderNextToolGuidance(toolsGuide, toolNames, sources) {
     return toolNames.map((name) => {
         const section = extractToolGuide(toolsGuide, name);
         if (!section)
             throw new Error(`missing tools-guide section: ${name}`);
+        if (name === "deep_search_next" && Array.isArray(sources))
+            return cropNextSourceBlocks(section, sources);
         return section;
     }).join("\n\n");
+}
+/** 从 deep_search_next 小节裁掉本轮没有可展开结果的来源块，避免把未命中源的方向/参数一起呈现。 */
+function cropNextSourceBlocks(section, sources) {
+    const wanted = new Set(sources.map(normalizeRoutingSource));
+    const lines = [];
+    let current = null;
+    let keepCurrent = false;
+    for (const raw of section.split(/\r?\n/)) {
+        const line = raw.replace(/\r$/, "");
+        const block = line.match(/^#####\s+\*\*(.+?)\*\*\s*[：:]?\s*$/);
+        if (block) {
+            if (keepCurrent)
+                lines.push("");
+            current = block[1].trim();
+            keepCurrent = wanted.has(current);
+            if (keepCurrent)
+                lines.push(line);
+            continue;
+        }
+        if (current === null) {
+            lines.push(line);
+        }
+        else if (keepCurrent) {
+            lines.push(line);
+        }
+    }
+    return lines.join("\n").trim();
 }

@@ -142,6 +142,7 @@ export const TOOL_KEYS = [
     "deep_search_next.param.visited",
     "deep_search_next.param.origin",
     "deep_search_next.param.query",
+    "deep_search_next.param.pattern",
     "deep_search_next.param.params",
     "deep_search_next.param.inline",
     "deep_search_next.param.limit",

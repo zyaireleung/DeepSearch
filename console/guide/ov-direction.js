@@ -15,6 +15,8 @@ export function ovDirections(result, { visited = [] } = {}) {
   dirs.push("back"); // 回源（uri/provenance 展开）
   dirs.push("global"); // 全局域（跨会话）
   if (level === "L0") dirs.push("root"); // 已到根，root 指示
+  // 结构化查看方向（ov-context 专用）：tree/list 按位置浏览，glob/grep 按 pattern 查询——直连 OV 返回真实数据
+  dirs.push("tree", "list", "glob", "grep");
   return dirs.filter((d) => !visited.includes(`ov_context:${d}`));
 }
 
@@ -26,6 +28,7 @@ export function ovJumpPayload(result, direction) {
     level: result.level || "L1",
     detail: direction === "up" ? "full" : "overview",
     uri: result.uri || undefined,
+    pattern: result.pattern || undefined, // glob/grep 查询模式（ov-context 专用）
     score: typeof result.score === "number" ? result.score : undefined,
   };
 }

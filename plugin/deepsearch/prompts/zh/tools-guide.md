@@ -4,7 +4,7 @@
 
 ## deep_search
 
-> 本地全部数据源信息检索
+> 检索本机记忆、历史会话与知识库
 
 ### 【查什么】
 
@@ -39,23 +39,34 @@
 
 ## deep_search_next
 
-> 沿 deep_search 已返回结果的真实关系继续展开
+> 沿 deep_search 结果的关系或目录继续展开
 
-### 【什么时候展开】
+### 【调用条件】
 
-只有某条结果明确返回 `next.available=true`，且 agent 需要继续查看它的上层、同级、引用或目录关系时才调用。mem0 / ov_session 是扁平源，没有方向，不使用本工具。
+只展开 `next.available=true` 的结果。直接使用该结果的 `id`，每次从其 `next.directions` 选择一个方向；未返回的方向不猜造。已有导航载荷时原样传递。
 
-### 【沿什么展开】
+### 【方向与参数】
 
-使用结果真实返回的 `id` 与 `next.directions`。一次只选一个方向：up / across / back / global / root / auto；方向未返回时不猜造。已有 step、method、origin、params 等导航载荷时原样传递。
+##### **ov_context**：
 
-### 【展开后怎么走】
+- `up` / `across` / `back` / `global` / `root` / `auto`：关系导航，返回下一步载荷。
+- `tree`：展开目录树；`params.uri` 指向目录，可用 `level_limit`、`node_limit`。
+- `list`：列出目录；`params.uri` 指向目录，可用 `recursive`、`offset`。
+- `glob`：按文件名通配搜索，必须传 `pattern`，如 `**/*.md`。
+- `grep`：按内容正则搜索，必须传 `pattern`；可用 `case_insensitive`。
 
-读取本轮 `next` 返回的新载荷：若已得到所需正文则停止；若又返回可用方向，可继续一层；若只有定位信息，可结合真实 carry 回到 `deep_search` 重新检索；若需要读取截断正文，转 `deep_search_read`。
+`tree` / `list` / `glob` / `grep` 返回真实结构化数据；`glob` / `grep` 默认从 `viking://` 搜索。
 
-### 【什么时候停止】
+##### **wiki**：
 
-`next.available=false`、目标内容已经出现、重复回到已访问节点、或继续展开不再缩小问题时停止。不要用 next 代替一次新的关键词检索。
+- `up`：查看实体或总览上层。
+- `across`：查看同级关联实体。
+- `back`：返回引用来源。
+- `global`：跨库全局导航。
+
+### 【处理结果】
+
+得到目标信息即停止；`available=false`、重复节点或继续展开不再缩小范围时也停止。关系导航只给定位载荷时，可据此重新检索；若又返回可用方向，可继续一层；若只有定位信息，可结合真实 carry 回到 `deep_search` 重新检索；需要完整正文时使用 `deep_search_read`。
 
 ## deep_search_read
 
