@@ -1,0 +1,23 @@
+{
+  "name": "plugin-service-manager",
+  "version": "0.2.0",
+  "description": "dsh plugin: register a '插件启动管理' right-sidebar tab to manage local service groups (start/stop/restart/status)",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dependencies": {},
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,8 @@
+# plugin-service-manager bundle patch — 插件自身条目
+# 由 profile 的 dsh.profile.bundles 加载本包时自动应用。
+# 用 `- insert:`（无 id）把插件 entry 追加进 entry list。
+- insert:
+    - id: plugin-service-manager
+      name: 'plugin-service-manager'
+      config:
+        enabled: true

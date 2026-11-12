@@ -74,4 +74,11 @@ __pycache__/
 .gateway-token
 backup/
 prod-backup-*
-web-research/scripts/.state/
+**/web-research/scripts/.state/
+
+# ============================================================
+# 🟡 graphify 知识图谱产物 —— 本地建图产物/日志/配置，不入库
+# ============================================================
+graphify-out/
+graphify-run.log
+.graphifyignore
