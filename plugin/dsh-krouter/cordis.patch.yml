@@ -1,0 +1,27 @@
+# dsh-krouter 桥：被动下意识召回 + 主动工具（经 MCP stdio）+ 每日定时总结 + 五事件注入。
+# enableWrite=false（默认）：只注册只读工具（ask/status/skill/changes），绝不写 vault。
+# enableWrite=true：额外注册写工具（note/correct/learn），写入语义由 mcp_server.py 实现（可 git revert）。
+#
+# bundle 层从空 entry 树开始组合（applyPatches([], layers)），顶层 `- id:` 只会
+# override 一个尚不存在的 entry 并被跳过，故必须用 insert 创建自身。
+- insert:
+    - id: dsh-krouter
+      name: dsh-krouter
+      config:
+        vaultPath: /Users/zyaire/Documents/第二大脑
+        enableWrite: false
+        label: ""
+        toolTimeoutMs: 60000
+        # 会话导入 consent（隐私闸门，只管 transcript 学习管线）：未设=只报告不改动；
+        # true=记录同意；"revoke"=撤回。用户没明确点头绝不开启。
+        consentSessions: false
+        distill: false
+        # transcript 桥接：整段 session 导入学进 vault。默认关。
+        # transcript=true 且 consentSessions 记录同意后才真正导入（双闸门）。
+        transcript: false
+        transcriptDryRun: false
+        nightlyEnabled: false
+        nightlyTime: "09:10"
+        nightlyModel: ""
+        # 会话蒸馏用模型（provider:model 全串，留空=跟随每日总结模型）。与每日总结可各选各的 provider。
+        distillModel: ""

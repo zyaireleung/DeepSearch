@@ -1,0 +1,42 @@
+{
+  "name": "dsh-krouter",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "dsh-krouter 桥：①被动下意识召回（agent/pre-step 钩子，每轮取最后一条 user 文本 spawn KRouter 本体检索，命中则注入独立 snapshot 消息，source.kind=user——宿主只认 user 才落成可见节点并前台渲染胶囊）②主动工具 9 个（ask/status/skill/changes 只读，note/correct/learn/page/guide 写与预习，经 mcp_server.py stdio 代理）③首调拦截：该工具说明与文档模板经 deferContext 在执行前送入上下文，同一会话再调直接放行④文案外置到 prompts/zh 四槽位与 templates/，按 tools:/layer: 选择投递⑤每日定时总结（nightly timer）⑥五事件被动注入（SessionStart/UserPromptSubmit/Stop/PreCompact）⑦会话空闲满 N 分钟等价 SessionEnd，跑一次蒸馏并抑制峰时。复用 KRouter 本体，不重实现写入语义，不联网，不碰密钥。",
+  "main": "lib/index.js",
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "package.json",
+    "prompts",
+    "templates"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./recollect": "./lib/recollect.js",
+    "./route": "./lib/route.js",
+    "./mcp": "./lib/mcp.js",
+    "./register": "./lib/register.js",
+    "./consent": "./lib/consent.js",
+    "./diag": "./lib/diag.js",
+    "./transcript": "./lib/transcript.js",
+    "./nightly": "./lib/nightly.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json",
+    "./prompts": "./lib/prompts.js",
+    "./tool-guide": "./lib/tool-guide.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  }
+}
