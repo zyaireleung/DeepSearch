@@ -1,0 +1,15 @@
+{
+  "name": "read-query-guard",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Read-only query tool-choice lint: denies bash cat/find/rg/grep at command position and points to the zero-permission read/glob/grep tools.",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib/index.js", "cordis.patch.yml", "package.json", "README.md"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" }
+  }
+}
