@@ -1,0 +1,7 @@
+# browser-route-guard bundle patch — 插件自身条目
+# 由 manifest 的 dsh.bundle.patch 加载本包时自动应用。
+# 用 `- insert:`（无 id）把插件 entry 追加进 entry list；
+# inject:["tools"] 由 lib/index.js 的 `export const inject` 提供，entry 不重复声明。
+- insert:
+    - id: browser-route-guard
+      name: 'browser-route-guard'
