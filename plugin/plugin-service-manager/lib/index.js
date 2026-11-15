@@ -44,7 +44,7 @@ const SERVICES = [
   { id: "mediacrawler", name: "MediaCrawler", host: "127.0.0.1", port: 9222, desc: "社媒抓取（探测 Thorium CDP）" },
 ];
 
-const MEM0_PY = process.env.MEM0_PY || `${HOME}/TencentDB-Agent-Memory/.data/mem0/venv/bin/python`;
+const MEM0_PY = process.env.MEM0_PY || `${HOME}/DeepSearch/.data/mem0/venv/bin/python`;
 // ---- canonical 6610 检索常驻：DeepSearch console/mem0/search_server.py，读 DeepSearch 重建库 ----
 const SEARCH_SERVER_PY = process.env.MEM0_SEARCH_SERVER_PY || `${HOME}/DeepSearch/console/mem0/search_server.py`;
 const SEARCH_SERVER_PORT = 6610;
