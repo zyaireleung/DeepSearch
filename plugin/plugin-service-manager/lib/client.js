@@ -36,7 +36,7 @@ window.__ModuleLoader__.load({
       { id: "deepsearch", name: "DeepSearch", desc: "DeepSearch 控制台", serviceIds: ["deepsearch-console"], autoStart: true },
       { id: "mem0", name: "Mem0 服务", desc: "检索常驻 canonical 6610", serviceIds: ["mem0-search-6610"], autoStart: true },
       { id: "mem0-db", name: "Mem0 DB", desc: "记忆库只读浏览（新库 6620）", serviceIds: ["mem0-browse"] },
-      { id: "embedding", name: "Embedding", desc: "embedding 上游（WeMM 108:8810）", serviceIds: ["wemm-embed"] },
+      { id: "embedding", name: "Embedding", desc: "embedding 上游（WeMM 112:8810）", serviceIds: ["wemm-embed"] },
       { id: "newapi", name: "New API", desc: "new-api LLM 网关", serviceIds: ["newapi"] },
       { id: "openviking", name: "OpenViking", desc: "生产记忆库 + 常驻轮询", serviceIds: ["openviking", "dsh-session-ingest"], autoStart: true },
       { id: "n8n", name: "n8n", desc: "工作流自动化", serviceIds: ["n8n-server"], autoStart: true },
@@ -79,7 +79,21 @@ window.__ModuleLoader__.load({
     }
     function apiPost(path, body) {
       return fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
-        .then((r) => r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)));
+        .then(function (r) {
+          return r.json().catch(function () { return null; }).then(function (data) {
+            if (r.ok) return data;
+            // 2026-11-18：旧实现只抛 "HTTP 500"，把响应体里的真因（如 ssh 超时）全丢掉了
+            var inner = null;
+            if (data && data.mem0) {
+              var keys = Object.keys(data.mem0);
+              if (keys.length) inner = data.mem0[keys[0]];
+            }
+            var detail = (data && (data.error || data.message)) || (inner && inner.error) || "";
+            var err = new Error(detail || ("HTTP " + r.status));
+            err.status = r.status;
+            throw err;
+          });
+        });
     }
 
     var REFRESH_WINDOW = [2000, 5000, 10000, 20000, 40000];
@@ -146,10 +160,14 @@ window.__ModuleLoader__.load({
             else { pollUntilRunning(groupId); }
           } else {
             setState(function (p) { return Object.assign({}, p, { loading: false, msg: "操作失败: " + (r && r.error) }); });
-            setBusyGroup(null);
+            if (action === "stop") { setBusyGroup(null); } else { pollUntilRunning(groupId); }
           }
-        }).catch(function (e) { setState(function (p) { return Object.assign({}, p, { loading: false, msg: "操作失败: " + e.message }); }); })
-          .finally(function () { if (action === "stop") setBusyGroup(null); });
+        }).catch(function (e) {
+          // 2026-11-18：失败不等于没生效（派发式启动/超时都可能服务已拉起）——
+          // 非 stop 一律继续轮询，最终用 status 真值收尾（全绿则显示"已全部运行"）
+          setState(function (p) { return Object.assign({}, p, { loading: false, msg: "操作失败: " + e.message }); });
+          if (action === "stop") { setBusyGroup(null); } else { pollUntilRunning(groupId); }
+        }).finally(function () { if (action === "stop") setBusyGroup(null); });
       }, [setBusyGroup, scheduleWindow, pollUntilRunning]);
 
       var toggleAutostart = React.useCallback(function (groupId, enabled) {

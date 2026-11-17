@@ -1,6 +1,6 @@
 {
   "name": "plugin-service-manager",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "dsh plugin: register a '插件启动管理' right-sidebar tab to manage local service groups (start/stop/restart/status)",
   "type": "module",
   "main": "lib/index.js",

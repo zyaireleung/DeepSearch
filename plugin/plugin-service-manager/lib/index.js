@@ -20,13 +20,17 @@ import { dirname } from "node:path";
 const execFileP = promisify(execFile);
 const HOME = process.env.HOME || "";
 
+// WeMM Embedding（2026-11-17 迁到 112；2026-11-18 起 host/port/脚本可用 env 覆盖，便于沙盒回归，默认值=生产）
+const WEMM_HOST = process.env.PSM_WEMM_HOST || "192.168.1.112";
+const WEMM_PORT = Number(process.env.PSM_WEMM_PORT || 8810);
+
 const SERVICES = [
   // DeepSearch 组（2026-10-26）：DeepSearch 控制台
   { id: "deepsearch-console", name: "DeepSearch Console", host: "127.0.0.1", port: 6600, desc: "DeepSearch 控制台" },
-  // Mem0 组：检索常驻 canonical 6610（search_server.py，读 DeepSearch 重建库）+ wemm-embed 远程 108:8810
+  // Mem0 组：检索常驻 canonical 6610（search_server.py，读 DeepSearch 重建库）+ wemm-embed 远程 112:8810
   // （旧 mem0-search 8915 已废弃，2026-11-12 移除）
   { id: "mem0-search-6610", name: "search_server", host: "127.0.0.1", port: 6610, desc: "Mem0 常驻检索（canonical 6610）" },
-  { id: "wemm-embed", name: "WeMM Embedding", host: "192.168.1.108", port: 8810, desc: "embedding 上游（wemm-fix.sh）" },
+  { id: "wemm-embed", name: "WeMM Embedding", host: WEMM_HOST, port: WEMM_PORT, desc: "embedding 上游（wemm-fix.sh）" },
   // Mem0 DB 板块：记忆库只读浏览（2026-11-12 迁到 DeepSearch 新库 + 6620）
   { id: "mem0-browse", name: "mem0-browse-server", host: "127.0.0.1", port: 6620, desc: "Mem0 记忆库只读浏览（新库 6620）" },
   { id: "newapi", name: "New API", host: "127.0.0.1", port: 13000, desc: "new-api LLM 网关（QuantumNous）" },
@@ -44,14 +48,14 @@ const SERVICES = [
   { id: "mediacrawler", name: "MediaCrawler", host: "127.0.0.1", port: 9222, desc: "社媒抓取（探测 Thorium CDP）" },
 ];
 
-const MEM0_PY = process.env.MEM0_PY || `${HOME}/DeepSearch/.data/mem0/venv/bin/python`;
+const MEM0_PY = process.env.MEM0_PY || `${HOME}/TencentDB-Agent-Memory/.data/mem0/venv/bin/python`;
 // ---- canonical 6610 检索常驻：DeepSearch console/mem0/search_server.py，读 DeepSearch 重建库 ----
 const SEARCH_SERVER_PY = process.env.MEM0_SEARCH_SERVER_PY || `${HOME}/DeepSearch/console/mem0/search_server.py`;
 const SEARCH_SERVER_PORT = 6610;
 const SEARCH_SERVER_ROOT = process.env.MEM0_ROOT || `${HOME}/DeepSearch/.data/mem0`;
 const SEARCH_SERVER_CONFIG = process.env.MEM0_CONFIG_PATH || `${HOME}/DeepSearch/console/console-config.json`;
 const SEARCH_SERVER_PROBE = process.env.MEM0_PROBE_RECORDS || `${HOME}/DeepSearch/.data/mem0/probe-records.jsonl`;
-const WEMM_FIX = "bash ~/.omlx/models/WeMM-Embedding-2B-MLX-4bit/wemm-fix.sh";
+const WEMM_FIX = process.env.PSM_WEMM_FIX || "bash ~/.omlx/models/WeMM-Embedding-2B-MLX-4bit/wemm-fix.sh";
 // ---- mem0-browse 6620（2026-11-12）：DeepSearch console/mem0/mem0-browse-server.py，读 DeepSearch 新库 ----
 const MEM0_BROWSE_SERVER = process.env.MEM0_BROWSE_SERVER || `${HOME}/DeepSearch/console/mem0/mem0-browse-server.py`;
 const MEM0_BROWSE_PORT = 6620;
@@ -168,7 +172,7 @@ async function status() {
 
 /** Mem0 组独立控制（不走 tdai-local.sh）：
  *  mem0-search-6610:  本机 nohup 起 search_server.py（:6610，读 DeepSearch 重建库）/ kill 端口进程
- *  wemm-embed:        ssh 108 执行 wemm-fix.sh（start）/ kill 8810 python（stop）
+ *  wemm-embed:        ssh 112 fire-and-forget 派发 wemm-fix.sh（start/restart；不再等通道关闭）/ kill 8810（stop）
  *  mem0-browse:       本机 nohup 起浏览 mem0-browse-server.py（:6620，读 DeepSearch 新库）/ kill 端口进程
  */
 async function controlMem0(action, ids) {
@@ -190,12 +194,17 @@ async function controlMem0(action, ids) {
         }
         results[s.id] = { ok: true, action };
       } else if (s.id === "wemm-embed") {
+        // 2026-11-18 修复「假失败」：远端脚本里的 `cd ... && nohup python ... &` 会让后台子 shell 继承
+        // ssh 的 stdout/stderr 管道——守护进程活多久，这条通道就关不掉多久，ssh 永不返回 →
+        // execFileP 30s 超时 → 前端看到 500，而服务其实已经起来（沙盒 8/8 复现与验证）。
+        // 改为 fire-and-forget 派发：整段脚本 nohup + 重定向 + 断开 stdin，ssh 立即返回；
+        // 成功与否交给前端 pollUntilRunning 轮询 /tdai-svc/status 判定。
         if (action === "start") {
-          await execFileP("ssh", ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "192.168.1.108", WEMM_FIX], { timeout: 30000 });
+          await execFileP("ssh", ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", WEMM_HOST, `nohup ${WEMM_FIX} >> /tmp/wemm-start.log 2>&1 < /dev/null & echo dispatched`], { timeout: 15000 });
         } else if (action === "stop") {
-          await execFileP("ssh", ["-o", "BatchMode=yes", "192.168.1.108", "lsof -tiTCP:8810 -sTCP:LISTEN | xargs -r kill; true"], { timeout: 15000 });
+          await execFileP("ssh", ["-o", "BatchMode=yes", WEMM_HOST, `lsof -tiTCP:${WEMM_PORT} -sTCP:LISTEN | xargs -r kill; true`], { timeout: 15000 });
         } else if (action === "restart") {
-          await execFileP("ssh", ["-o", "BatchMode=yes", "192.168.1.108", `lsof -tiTCP:8810 -sTCP:LISTEN | xargs -r kill; sleep 1; ${WEMM_FIX}`], { timeout: 30000 });
+          await execFileP("ssh", ["-o", "BatchMode=yes", WEMM_HOST, `lsof -tiTCP:${WEMM_PORT} -sTCP:LISTEN | xargs -r kill; sleep 1; nohup ${WEMM_FIX} >> /tmp/wemm-start.log 2>&1 < /dev/null & echo dispatched`], { timeout: 15000 });
         }
         results[s.id] = { ok: true, action };
       } else if (s.id === "mem0-browse") {
@@ -497,7 +506,7 @@ async function apply(ctx, config) {
         toStart.push(() => controlDeepSearch("start"));
       }
       // Mem0 组（2026-11-12 起：仅 canonical search_server 6610；旧 8915 已废弃移除）；
-      // embedding(108:8810，远程 ssh) 不随 dsh 自启动
+      // embedding(112:8810，远程 ssh) 不随 dsh 自启动
       if (cfg.mem0) {
         const need = [];
         if (byId.get("mem0-search-6610") === false) need.push("mem0-search-6610");
